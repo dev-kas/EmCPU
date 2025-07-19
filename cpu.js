@@ -1,0 +1,1286 @@
+import { Memory } from "./memory.js";
+
+export class CPU {
+    // --- STATIC CONSTANTS ---
+    static CR0_PE = 1n << 0n;  // Protected Mode Enable
+    static CR0_PG = 1n << 31n; // Paging Enable
+
+    static CR4_PAE = 1n << 5n; // Physical Address Extension
+
+    static EFER_LME = 1n << 8n; // Long Mode Enable
+    static EFER_NXE = 1n << 11n; // No-Execute Enable (for future NX bit support)
+
+    // Constants for Page Table Entry (PTE) bits
+    // These apply to PML4E, PDPTE, PDE, PTE
+    static PTE_PRESENT       = 1n << 0n;   // P: Present (must be 1 for valid entry)
+    static PTE_READ_WRITE    = 1n << 1n;   // RW: Read/Write (0=read-only, 1=read/write)
+    static PTE_USER_SUPER    = 1n << 2n;   // US: User/Supervisor (0=supervisor-only, 1=user/supervisor)
+    static PTE_WRITE_THROUGH = 1n << 3n;   // PWT: Page Write-Through
+    static PTE_CACHE_DISABLE = 1n << 4n;   // PCD: Page Cache Disable
+    static PTE_ACCESSED      = 1n << 5n;   // A: Accessed (set by CPU on access)
+    static PTE_DIRTY         = 1n << 6n;   // D: Dirty (set by CPU on write) - only for last-level entries (PTE, PDE for 2MB, PDPTE for 1GB)
+    static PTE_PAGE_SIZE     = 1n << 7n;   // PS: Page Size (0=4KB, 1=2MB or 1GB depending on level)
+    static PTE_GLOBAL        = 1n << 8n;   // G: Global (prevents TLB flush on CR3 load - for kernel pages)
+    // Bits 9-11 are ignored for software use
+    // Bits 12-51 for physical page address (for 4KB pages) or bits 21-51 for 2MB/1GB pages
+    // Bits 52-62 ignored for software use
+    // Bit 63 (NXE in EFER, if enabled) for No-Execute
+
+    /**
+     * Creates a minimal 4-level page table structure to identity-map a range of virtual addresses to physical.
+     * Assumes 4KB pages.
+     * @param {Memory} memory The emulated memory object.
+     * @param {BigInt} virtualStart The starting virtual address to map.
+     * @param {BigInt} physicalStart The starting physical address to map.
+     * @param {BigInt} sizeBytes The size of the region to map (must be a multiple of 4KB).
+     * @param {BigInt} pageTableBasePhysAddr The base physical address where page tables will be stored.
+     * @returns {BigInt} The physical address of the PML4 table.
+     */
+    static setupIdentityPaging(memory, virtualStart, physicalStart, sizeBytes, pageTableBasePhysAddr) {
+        const PAGE_SIZE = 4096n; // 4KB
+        if (sizeBytes % PAGE_SIZE !== 0n) {
+            throw new Error("Mapped size must be a multiple of 4KB.");
+        }
+        const numPages = sizeBytes / PAGE_SIZE;
+
+        let currentTableAddr = pageTableBasePhysAddr;
+
+        const pml4TablePhys = currentTableAddr;
+        currentTableAddr += PAGE_SIZE;
+
+        const pdptTablePhys = currentTableAddr;
+        currentTableAddr += PAGE_SIZE;
+
+        const pdTablePhys = currentTableAddr;
+        currentTableAddr += PAGE_SIZE;
+
+        const ptTablePhys = currentTableAddr;
+        currentTableAddr += PAGE_SIZE;
+
+        console.log(`Setting up identity map from VA 0x${virtualStart.toString(16)} to PA 0x${physicalStart.toString(16)}, size 0x${sizeBytes.toString(16)}`);
+        console.log(`  PML4 Table at PA 0x${pml4TablePhys.toString(16)}`);
+        console.log(`  PDPT Table at PA 0x${pdptTablePhys.toString(16)}`);
+        console.log(`  PD Table at PA 0x${pdTablePhys.toString(16)}`);
+        console.log(`  PT Table at PA 0x${ptTablePhys.toString(16)}`);
+
+
+        // Initialize all tables to 0
+        for (let i = 0n; i < PAGE_SIZE / 8n; i++) {
+            memory.writeBigUint64(Number(pml4TablePhys + i * 8n), 0n);
+            memory.writeBigUint64(Number(pdptTablePhys + i * 8n), 0n);
+            memory.writeBigUint64(Number(pdTablePhys + i * 8n), 0n);
+            memory.writeBigUint64(Number(ptTablePhys + i * 8n), 0n);
+        }
+
+        // Helper for writing and verifying page table entries
+        const writeAndVerifyPTE = (addr, value, description) => {
+            memory.writeBigUint64(Number(addr), value);
+            const readBack = memory.readBigUint64(Number(addr));
+            if (readBack !== value) {
+                console.error(`ERROR: ${description} write mismatch at 0x${addr.toString(16)}! Written: 0x${value.toString(16)}, Readback: 0x${readBack.toString(16)}`);
+                throw new Error("Page table write verification failed.");
+            } else {
+                console.log(`  VERIFIED: ${description} at 0x${addr.toString(16)} is 0x${readBack.toString(16)}`);
+            }
+        };
+
+        // Map the first entry in each table to point to the next table
+        // PML4[0] -> PDPT[0]
+        let pml4e_value = pdptTablePhys | CPU.PTE_PRESENT | CPU.PTE_READ_WRITE | CPU.PTE_USER_SUPER;
+        writeAndVerifyPTE(pml4TablePhys, pml4e_value, `PML4E[0] -> PDPT[0]`);
+
+        // PDPT[0] -> PD[0]
+        let pdpte_value = pdTablePhys | CPU.PTE_PRESENT | CPU.PTE_READ_WRITE | CPU.PTE_USER_SUPER;
+        writeAndVerifyPTE(pdptTablePhys, pdpte_value, `PDPTE[0] -> PD[0]`);
+
+        // PD[0] -> PT[0]
+        let pde_value = ptTablePhys | CPU.PTE_PRESENT | CPU.PTE_READ_WRITE | CPU.PTE_USER_SUPER;
+        writeAndVerifyPTE(pdTablePhys, pde_value, `PDE[0] -> PT[0]`); 
+
+        // Now, map the actual pages in the Page Table
+        for (let i = 0n; i < numPages; i++) {
+            const currentVirtualPage = virtualStart + i * PAGE_SIZE;
+            const currentPhysicalPage = physicalStart + i * PAGE_SIZE;
+            
+            let pte_value = currentPhysicalPage | CPU.PTE_PRESENT | CPU.PTE_READ_WRITE | CPU.PTE_USER_SUPER;
+            // The index into the Page Table depends on the virtual address's bits 12-20
+            const ptIndex = (currentVirtualPage >> 12n) & 0x1FFn;
+            const pteWriteAddr = ptTablePhys + ptIndex * 8n; // Calculate the specific address for this PTE
+
+            // For detailed debugging, log every 100th page, or specific pages (like 0x7C00 or 0x8000)
+            if (i % 100n === 0n || currentVirtualPage === 0x7C00n || currentVirtualPage === 0x8000n) { 
+                 writeAndVerifyPTE(pteWriteAddr, pte_value, `PTE for VA 0x${currentVirtualPage.toString(16)}`);
+            } else {
+                // If not logging, just perform the write
+                memory.writeBigUint64(Number(pteWriteAddr), pte_value);
+            }
+        }
+
+        return pml4TablePhys; // Return the base address of the PML4 table for CR3
+    }
+
+    constructor(memory = new Memory(1024 * 1024 * 1)) {
+        this.memory = memory;
+
+        // General Purpose Registers
+        this.rax = 0n; this.rbx = 0n; this.rcx = 0n; this.rdx = 0n;
+        this.rsp = 0n; this.rbp = 0n; this.rsi = 0n; this.rdi = 0n;
+        this.r8 = 0n; this.r9 = 0n; this.r10 = 0n; this.r11 = 0n;
+        this.r12 = 0n; this.r13 = 0n; this.r14 = 0n; this.r15 = 0n;
+
+        // Instruction Pointer
+        this.rip = 0n;
+
+        // Flags
+        this.flags = {
+            cf: 0, // Carry Flag
+            zf: 0, // Zero Flag
+            sf: 0, // Sign Flag
+            of: 0, // Overflow Flag
+            // TODO: Add more flags
+        }
+
+        // CPU Modes and Control Registers
+        this.mode = "real"; // real, protected, long
+        this.cr0 = 0n; // Control Register 0
+        this.cr3 = 0n; // Control Register 3
+        this.cr4 = 0n; // Control Register 4
+        this.efer = 0n; // Extended Feature Enable Register
+
+        // Mapping register names to their internal names
+        this.registers = {
+            // Full 64-bit
+            'rax': 'rax', 'rcx': 'rcx', 'rdx': 'rdx', 'rbx': 'rbx',
+            'rsp': 'rsp', 'rbp': 'rbp', 'rsi': 'rsi', 'rdi': 'rdi',
+            'r8': 'r8', 'r9': 'r9', 'r10': 'r10', 'r11': 'r11',
+            'r12': 'r12', 'r13': 'r13', 'r14': 'r14', 'r15': 'r15',
+            // 32-bit (low half of 64-bit)
+            'eax': 'rax', 'ecx': 'rcx', 'edx': 'rdx', 'ebx': 'rbx',
+            'esp': 'rsp', 'ebp': 'rbp', 'esi': 'rsi', 'edi': 'rdi',
+            'r8d': 'r8', 'r9d': 'r9', 'r10d': 'r10', 'r11d': 'r11',
+            'r12d': 'r12', 'r13d': 'r13', 'r14d': 'r14', 'r15d': 'r15',
+            // 16-bit (low half of 32-bit)
+            'ax': 'rax', 'cx': 'rcx', 'dx': 'rdx', 'bx': 'rbx',
+            'sp': 'rsp', 'bp': 'rbp', 'si': 'rsi', 'di': 'rdi',
+            'r8w': 'r8', 'r9w': 'r9', 'r10w': 'r10', 'r11w': 'r11',
+            'r12w': 'r12', 'r13w': 'r13', 'r14w': 'r14', 'r15w': 'r15',
+            // 8-bit (low byte of 16-bit) - AL, CL, DL, BL
+            'al': 'rax', 'cl': 'rcx', 'dl': 'rdx', 'bl': 'rbx',
+            // 8-bit (high byte of 16-bit) - AH, CH, DH, BH
+            'ah': 'rax', 'ch': 'rcx', 'dh': 'rdx', 'bh': 'rbx',
+            // 8-bit (low byte of RBP/RSP/RSI/RDI when REX prefix is used) - SPL, BPL, SIL, DIL
+            'spl': 'rsp', 'bpl': 'rbp', 'sil': 'rsi', 'dil': 'rdi',
+            // 8-bit (low byte of R8-R15) - R8B-R15B
+            'r8b': 'r8', 'r9b': 'r9', 'r10b': 'r10', 'r11b': 'r11',
+            'r12b': 'r12', 'r13b': 'r13', 'r14b': 'r14', 'r15b': 'r15',
+        };
+    }
+
+    // Helper to read register values with size handling
+    readRegister(regName, sizeBytes) {
+        const fullReg = this.registers[regName];
+        if (!fullReg) {
+            throw new Error(`Attempted to read unknown register name: ${regName}`);
+        }
+        let val = this[fullReg]; // val is BigInt (e.g. this.rax)
+        if (sizeBytes === 1) {
+            // Handle AH, CH, DH, BH (high byte of 16-bit)
+            if (['ah', 'ch', 'dh', 'bh'].includes(regName)) {
+                return (val >> 8n) & 0xFFn;
+            }
+            // For AL, CL, DL, BL, SPL, BPL, SIL, DIL, R8B-R15B, it's the lowest byte
+            return (val & 0xFFn);
+        }
+        if (sizeBytes === 2) return (val & 0xFFFFn);
+        if (sizeBytes === 4) return (val & 0xFFFFFFFFn);
+        if (sizeBytes === 8) return val;
+        throw new Error(`Invalid register size: ${sizeBytes}`);
+    }
+
+    // Helper to write values to register values with size handling
+    writeRegister(regName, value, sizeBytes) {
+        const fullReg = this.registers[regName];
+        if (fullReg === undefined) {
+            throw new Error(`Attempted to write to unknown register name: ${regName}`);
+        }
+        let currentVal = this[fullReg];
+        let valToWrite = BigInt(value);
+
+        if (sizeBytes === 1) {
+            if (['ah', 'ch', 'dh', 'bh'].includes(regName)) {
+                // Clear the old AH/CH/DH/BH byte, then set the new one
+                this[fullReg] = (currentVal & ~(0xFFn << 8n)) | ((valToWrite & 0xFFn) << 8n);
+            } else {
+                // AL, CL, DL, BL, SPL, BPL, SIL, DIL, R8B-R15B
+                // Clear the lowest byte, then set the new one. Upper bits untouched.
+                this[fullReg] = (currentVal & ~0xFFn) | (valToWrite & 0xFFn);
+            }
+        } else if (sizeBytes === 2) {
+            // AX, CX, DX, BX, SP, BP, SI, DI, R8W-R15W
+            // Clear the lowest 16 bits, then set the new one. Upper bits untouched.
+            this[fullReg] = (currentVal & ~0xFFFFn) | (valToWrite & 0xFFFFn);
+        } else if (sizeBytes === 4) {
+            // EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI, R8D-R15D
+            // Clear the lowest 32 bits, then set the new one. Upper bits untouched.
+            // this[fullReg] = (currentVal & ~0xFFFFFFFFn) | (valToWrite & 0xFFFFFFFFn);
+            this[fullReg] = valToWrite & 0xFFFFFFFFn;
+        } else if (sizeBytes === 8) {
+            // RAX, RCX, etc. Full 64-bit write.
+            this[fullReg] = valToWrite;
+        } else {
+            throw new Error(`Invalid register size for writing: ${sizeBytes} for register ${regName}`);
+        }
+    }
+
+    // Updates arithmetic flags based on result and operands
+    // Result, operand1, operand2 should be BigInts.
+    // 'operation' can be 'add' or 'sub'
+    updateArithmeticFlags(result, operand1, operand2, sizeBytes, operation) {
+        const bitWidth = BigInt(sizeBytes * 8);
+        const bitMask = (1n << bitWidth) - 1n; 
+        const signBitPos = bitWidth - 1n; 
+        const signBitMask = 1n << signBitPos;
+
+        // Apply the size mask to ensure correct behavior for operations that wrap around
+        const maskedResult = result & bitMask;
+        const maskedOperand1 = operand1 & bitMask;
+        const maskedOperand2 = operand2 & bitMask;
+
+        // Zero Flag (ZF): Set if result is 0
+        this.flags.zf = (maskedResult === 0n) ? 1 : 0;
+
+        // Sign Flag (SF): Set if result's MSB is 1
+        this.flags.sf = ((maskedResult & signBitMask) !== 0n) ? 1 : 0;
+
+        // Carry Flag (CF): For unsigned overflow
+        // For ADD: CF = 1 if result (unsigned) > max_unsigned_value_for_size
+        // For SUB: CF = 1 if operand1 (unsigned) < operand2 (unsigned) (borrow occurred)
+        if (operation === 'add') {
+            this.flags.cf = (result > bitMask) ? 1 : 0;
+        } else if (operation === 'sub') {
+            this.flags.cf = (maskedOperand1 < maskedOperand2) ? 1 : 0;
+        } else {
+            // For logical operations (AND, OR, XOR), CF is always 0
+            this.flags.cf = 0; 
+        }
+
+        // Overflow Flag (OF): For signed overflow
+        // OF is set if the result's sign is different from the operands' sign (for ADD)
+        // or if the result's sign is different from the minuend's sign when the subtrahend's sign is inverted (for SUB).
+        // This is often checked by XORing sign bits:
+        // For ADD: OF = ( (Op1 ^ Res) & (Op2 ^ Res) ) >> signBitPos
+        // For SUB: OF = ( (Op1 ^ Res) & (~Op2 ^ Res) ) >> signBitPos  (where ~Op2 means bitwise NOT of Op2 within its size)
+
+        const s1 = (maskedOperand1 & signBitMask) !== 0n; // Sign of first operand
+        const s2 = (maskedOperand2 & signBitMask) !== 0n; // Sign of second operand
+        const sR = (maskedResult & signBitMask) !== 0n;   // Sign of result
+
+        this.flags.of = 0; // Assume no overflow initially
+
+        if (operation === 'add') {
+            if ((s1 === s2) && (s1 !== sR)) { // Adding two positives makes negative, or two negatives makes positive
+                this.flags.of = 1;
+            }
+        } else if (operation === 'sub') {
+            // OF is set if: (positive - negative = negative) OR (negative - positive = positive)
+            // This is equivalent to: (s1 XOR s2) AND (s1 XOR sR)
+            if ((s1 !== s2) && (s1 !== sR)) { // e.g., 7 - (-1) = 8. s1=0, s2=1, sR=0. (0!=1) && (0!=0) -> false (no OF)
+                                             // e.g., 127 - (-1) = 128. s1=0, s2=1, sR=1. (0!=1) && (0!=1) -> true (OF)
+                this.flags.of = 1;
+            }
+        } else {
+            // For logical operations (AND, OR, XOR), OF is always 0
+            this.flags.of = 0;
+        }
+    }
+
+    step() {
+        let rexPrefix = 0;
+        let operandSizeOverride = false; // Flag for 0x66 prefix
+        let defaultOperandSize = 4; // Default 32 bit (unless REX.W or 0x66 override)
+
+        let rex_w = 0;
+        let rex_r = 0;
+        let rex_x = 0;
+        let rex_b = 0;
+
+        let currentRIPBeforeFetch = this.rip; // Store RIP to calculate instruction start accurately
+
+        let opcode; // Declare opcode here, will be assigned inside prefix loop
+
+        // --- Handle Prefixes (Loop to consume all prefixes) ---
+        // Read bytes one by one, processing as prefixes until main opcode or 0x0F is found.
+        let byte = this.readInstructionByte(); // Read the first byte of the potential instruction
+
+        while (true) {
+            if (byte === 0x66) { // Operand Size Override Prefix
+                operandSizeOverride = true;
+                byte = this.readInstructionByte(); // Consume 0x66, read next byte
+            } else if ((byte & 0xF0) === 0x40) { // REX prefix: 0x40 - 0x4F
+                rexPrefix = byte;
+                rex_w = (rexPrefix & 0x08) >>> 3;
+                rex_r = (rexPrefix & 0x04) >>> 2;
+                rex_x = (rexPrefix & 0x02) >>> 1;
+                rex_b = (rexPrefix & 0x01);
+                byte = this.readInstructionByte(); // Consume REX, read next byte
+            } 
+            // Add other prefixes here (e.g., segment overrides 0x2E, 0x36, REP prefixes 0xF2, 0xF3)
+            else {
+                // If it's not a known prefix, it must be the main opcode or 0x0F prefix
+                opcode = byte; // Assign the actual opcode
+                break; // Exit loop
+            }
+        }
+
+        // After consuming all prefixes, determine the final operand size
+        // REX.W (0x08 bit) indicates 64-bit operand size. It takes precedence over 0x66.
+        // If REX.W is NOT set, AND 0x66 is present, then it's 16-bit.
+        // Otherwise, it's 32-bit default for protected mode or 64-bit default for long mode.
+        if (rex_w !== 0) {
+            defaultOperandSize = 8;
+        } else if (operandSizeOverride) { // 0x66 present, but no REX.W
+            defaultOperandSize = 2; // Set to 16-bit
+        } 
+        // If no REX.W and no 0x66, defaultOperandSize remains 4 (32-bit default for protected mode).
+        // A truly comprehensive emulator would set defaultOperandSize = 8 if in long mode,
+        // but for now, rely on REX.W or 0x66 to set it explicitly from the instruction.
+
+        // 2-byte opcode prefix (0x0F) - This comes *after* other prefixes
+        let twoByteOpcode = false;
+        if (opcode === 0x0F) {
+            twoByteOpcode = true;
+            opcode = this.readInstructionByte(); // Read the second byte of the opcode
+        }
+
+        // --- Logging the Instruction ---
+        console.log(`RIP: 0x${currentRIPBeforeFetch.toString(16).padStart(4, '0')}, OPCODE: 0x${(twoByteOpcode ? '0F' : '')}${opcode.toString(16).padStart(2, '0')}${rexPrefix ? ` (REX: 0x${rexPrefix.toString(16)})` : ''}${operandSizeOverride ? ' (0x66)' : ''}`);
+
+        // --- Instruction Decoding and Execution ---
+
+        // Priority 1: Handle two-byte opcodes (opcodes that follow 0x0F)
+        if (twoByteOpcode) {
+            // MOV CRn, Reg/Mem64 (0x0F 22)
+            if (opcode === 0x22) {
+                const modrm = this.readModRMByte();
+                const crIdx = modrm.reg; // CR register is encoded in the 'reg' field of ModR/M
+                const sourceRegFullIndex = modrm.rm + (rex_b << 3); // Source GPR is encoded in 'r/m' field, REX.B applies
+                
+                // Pass hasRexPrefix (rexPrefix !== 0) to getRegisterString.
+                const sourceRegName = this.getRegisterString(sourceRegFullIndex, 8, rexPrefix !== 0);
+
+                const sourceValue = this.readRegister(sourceRegName, 8);
+
+                switch (crIdx) {
+                    case 0: this.cr0 = sourceValue; console.log(`Decoded: MOV CR0, ${sourceRegName.toUpperCase()} (0x${sourceValue.toString(16)}n)`); this.updateCPUMode(); break;
+                    case 2: this.cr2 = sourceValue; console.log(`Decoded: MOV CR2, ${sourceRegName.toUpperCase()} (0x${sourceValue.toString(16)}n)`); break;
+                    case 3: this.cr3 = sourceValue; console.log(`Decoded: MOV CR3, ${sourceRegName.toUpperCase()} (0x${sourceValue.toString(16)}n)`); break;
+                    case 4: this.cr4 = sourceValue; console.log(`Decoded: MOV CR4, ${sourceRegName.toUpperCase()} (0x${sourceValue.toString(16)}n)`); this.updateCPUMode(); break;
+                    default: console.warn(`MOV CR${crIdx}, ${sourceRegName.toUpperCase()} not fully implemented/valid.`); 
+                }
+                return true;
+            }
+            // WRMSR (0x0F 30)
+            if (opcode === 0x30) {
+                const msrAddr = this.readRegister('rcx', 8); 
+                const valueHigh = this.readRegister('rdx', 8) << 32n; 
+                const valueLow = this.readRegister('rax', 8) & 0xFFFFFFFFn; 
+                const value = valueHigh | valueLow;
+
+                if (msrAddr === 0xC0000080n) { // EFER MSR
+                    this.efer = value;
+                    if ((this.efer & CPU.EFER_LME) !== 0n) {
+                        console.log(`Long Mode Enable (LME) bit set in EFER!`);
+                    }
+                    this.updateCPUMode();
+                } else {
+                    console.warn(`WRMSR to unknown MSR 0x${msrAddr.toString(16)}`);
+                }
+                return true;
+            }
+            // Add other 2-byte opcodes here as you implement them (e.g., specific Jcc, SETcc, etc.)
+
+            // If a two-byte opcode is not handled here, it's genuinely unknown
+            console.log(`Unknown 2-byte opcode: 0x0F ${opcode.toString(16)} at 0x${currentRIPBeforeFetch.toString(16)}`);
+            return true; // Or false if you want to halt on unknown 2-byte opcodes
+        }
+
+        // Priority 2: Handle single-byte opcodes (only if not a two-byte opcode)
+
+        // NOP instruction
+        if (opcode === 0x90) {
+            console.log("Decoded: NOP");
+            return true;
+        }
+
+        // HLT instruction
+        if (opcode === 0xF4) {
+            console.log("HLT instruction encountered. Emulation halted.");
+            return false;
+        }
+
+        // Universal MOV reg, imm (0xB0 - 0xBF)
+        if (opcode >= 0xB0 && opcode <= 0xBF) {
+            const destRegIdx = opcode & 0x07;
+            
+            let immValue;
+            let sizeBytes;
+            let destRegName;
+
+            const getImmediateValue = (currentRip, numBytes) => {
+                if ((this.cr0 & CPU.CR0_PE) !== 0n) { 
+                    if (numBytes === 1) return BigInt(this.readVirtualUint8(currentRip));
+                    else if (numBytes === 2) return BigInt(this.readVirtualUint16(currentRip)); 
+                    else if (numBytes === 4) return BigInt(this.readVirtualUint32(currentRip));
+                    else if (numBytes === 8) return this.readVirtualBigUint64(currentRip);
+                } else {
+                    if (numBytes === 1) return BigInt(this.memory.readUint8(Number(currentRip)));
+                    else if (numBytes === 2) return BigInt(this.memory.readUint16(Number(currentRip))); 
+                    else if (numBytes === 4) return BigInt(this.memory.readUint32(Number(currentRip)));
+                    else if (numBytes === 8) return BigInt(this.memory.readBigUint64(Number(currentRip))); // Ensure BigInt
+                }
+                throw new Error(`Unsupported immediate size for MOV reg, imm: ${numBytes}`);
+            };
+
+            if (opcode >= 0xB0 && opcode <= 0xB7) { // 8-bit MOV (B0-B7)
+                destRegName = this.getRegisterString(destRegIdx + (rex_b << 3), 1, rexPrefix !== 0); // Pass hasRexPrefix
+                sizeBytes = 1;
+                immValue = getImmediateValue(this.rip, 1);
+                this.rip += 1n;
+            } else { // 16/32/64-bit MOV (B8-BF)
+                sizeBytes = defaultOperandSize; // Use the determined operand size
+                destRegName = this.getRegisterString(destRegIdx + (rex_b << 3), sizeBytes, rexPrefix !== 0); // Pass hasRexPrefix
+                if (sizeBytes === 2) { // 16-bit
+                    immValue = getImmediateValue(this.rip, 2);
+                    this.rip += 2n;
+                } else if (sizeBytes === 4) { // 32-bit
+                    immValue = getImmediateValue(this.rip, 4);
+                    this.rip += 4n;
+                } else if (sizeBytes === 8) { // 64-bit
+                    immValue = getImmediateValue(this.rip, 8);
+                    this.rip += 8n;
+                } else {
+                    throw new Error(`Unsupported immediate size for MOV reg, imm (B8-BF variant) with sizeBytes: ${sizeBytes}`);
+                }
+            }
+            this.writeRegister(destRegName, immValue, sizeBytes);
+            console.log(`Decoded: MOV ${destRegName.toUpperCase()}, 0x${immValue.toString(16)}${sizeBytes === 8 ? 'n' : ''}`);
+            return true;
+        }
+        
+        // ADD reg, r/m (0x01 / 0x03)
+        if (opcode === 0x01 || opcode === 0x03) {
+            const modrm = this.readModRMByte();
+            const dBit = (opcode >>> 1) & 0x01; 
+            const wBit = opcode & 0x01;         
+
+            let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
+
+            const regOpFullIndex = modrm.reg + (rex_r << 3);
+            const regOpName = this.getRegisterString(regOpFullIndex, sizeBytes, rexPrefix !== 0); // Pass hasRexPrefix
+            const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0); // Pass hasRexPrefixForNaming
+
+            let sourceValue;
+            let destValue;
+            let destOperand; 
+
+            if (rmOperand.type === 'reg') {
+                if (dBit === 0) { 
+                    sourceValue = this.readRegister(regOpName, sizeBytes);
+                    destValue = this.readRegister(rmOperand.name, sizeBytes);
+                    destOperand = rmOperand; 
+                } else { 
+                    sourceValue = this.readRegister(rmOperand.name, sizeBytes);
+                    destValue = this.readRegister(regOpName, sizeBytes);
+                    destOperand = { type: 'reg', name: regOpName }; 
+                }
+            } else { 
+                if (dBit === 0) { 
+                    sourceValue = this.readRegister(regOpName, sizeBytes);
+                    if (sizeBytes === 1) destValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) destValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) destValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) destValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for ADD.");
+                    destOperand = rmOperand; 
+                } else { 
+                    if (sizeBytes === 1) sourceValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) sourceValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) sourceValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) sourceValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for ADD.");
+                    destValue = this.readRegister(regOpName, sizeBytes);
+                    destOperand = { type: 'reg', name: regOpName }; 
+                }
+            }
+            
+            const result = destValue + sourceValue;
+            this.updateArithmeticFlags(result, destValue, sourceValue, sizeBytes, 'add');
+
+            if (destOperand.type === 'reg') {
+                this.writeRegister(destOperand.name, result, sizeBytes);
+            } else { 
+                if (sizeBytes === 1) this.writeVirtualUint8(destOperand.address, Number(result));
+                else if (sizeBytes === 2) this.writeVirtualUint16(destOperand.address, Number(result));
+                else if (sizeBytes === 4) this.writeVirtualUint32(destOperand.address, Number(result));
+                else if (sizeBytes === 8) this.writeVirtualBigUint64(destOperand.address, result);
+                else throw new Error("Unsupported memory write size for ADD.");
+            }
+            console.log(`Decoded: ADD ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, ${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''} -> Result: 0x${result.toString(16)}n`);
+            return true;
+        }
+
+        // OR reg, r/m; OR r/m, reg (0x09 / 0x0B for 16/32/64-bit, 0x08 / 0x0A for 8-bit)
+        if (opcode >= 0x08 && opcode <= 0x0B) {
+            const modrm = this.readModRMByte();
+            const dBit = (opcode >>> 1) & 0x01; // Direction bit
+            const wBit = opcode & 0x01;         // Width bit
+
+            let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
+
+            const regOpFullIndex = modrm.reg + (rex_r << 3);
+            const regOpName = this.getRegisterString(regOpFullIndex, sizeBytes, rexPrefix !== 0); // Pass hasRexPrefix
+            const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0); // Pass hasRexPrefixForNaming
+
+            let sourceValue;
+            let destValue;
+            let destOperand;
+
+            if (rmOperand.type === 'reg') {
+                if (dBit === 0) { // OR r/m, reg (reg is source, r/m is dest)
+                    sourceValue = this.readRegister(regOpName, sizeBytes);
+                    destValue = this.readRegister(rmOperand.name, sizeBytes);
+                    destOperand = rmOperand;
+                } else { // OR reg, r/m (r/m is source, reg is dest)
+                    sourceValue = this.readRegister(rmOperand.name, sizeBytes);
+                    destValue = this.readRegister(regOpName, sizeBytes);
+                    destOperand = { type: 'reg', name: regOpName };
+                }
+            } else { // rmOperand.type === 'mem'
+                if (dBit === 0) { // OR r/m, reg (reg is source, r/m is dest)
+                    sourceValue = this.readRegister(regOpName, sizeBytes);
+                    if (sizeBytes === 1) destValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) destValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) destValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) destValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for OR.");
+                    destOperand = rmOperand;
+                } else { // OR reg, r/m (r/m is source, reg is dest)
+                    if (sizeBytes === 1) sourceValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) sourceValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) sourceValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) sourceValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for OR.");
+                    destValue = this.readRegister(regOpName, sizeBytes);
+                    destOperand = { type: 'reg', name: regOpName };
+                }
+            }
+            
+            const result = destValue | sourceValue; // Perform OR operation
+
+            this.flags.cf = 0; 
+            this.flags.of = 0; 
+            this.flags.zf = (result === 0n) ? 1 : 0; 
+            const bitWidth = BigInt(sizeBytes * 8);
+            const signBitMask = 1n << (bitWidth - 1n);
+            this.flags.sf = ((result & signBitMask) !== 0n) ? 1 : 0; 
+
+            if (destOperand.type === 'reg') {
+                this.writeRegister(destOperand.name, result, sizeBytes);
+            } else { 
+                if (sizeBytes === 1) this.writeVirtualUint8(destOperand.address, Number(result));
+                else if (sizeBytes === 2) this.writeVirtualUint16(destOperand.address, Number(result));
+                else if (sizeBytes === 4) this.writeVirtualUint32(destOperand.address, Number(result));
+                else if (sizeBytes === 8) this.writeVirtualBigUint64(destOperand.address, result);
+                else throw new Error("Unsupported memory write size for OR.");
+            }
+            const destOperandString = destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`;
+            const srcOperandString = (dBit === 0) ? regOpName.toUpperCase() : (rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`);
+            console.log(`Decoded: OR ${destOperandString}, ${srcOperandString} (0x${destValue.toString(16)}n | 0x${sourceValue.toString(16)}n) -> Result: 0x${result.toString(16)}n`);
+            return true;
+        }
+
+        // AND reg, r/m; AND r/m, reg (0x21 / 0x23 for 16/32/64-bit, 0x20 / 0x22 for 8-bit)
+        // Note: This block handles AND r/m, reg and AND reg, r/m forms.
+        // Opcodes:
+        // 0x20: AND r/m8, reg8
+        // 0x21: AND r/m16/32/64, reg16/32/64
+        // 0x22: AND reg8, r/m8
+        // 0x23: AND reg16/32/64, r/m16/32/64
+        if (opcode >= 0x20 && opcode <= 0x23) {
+            const modrm = this.readModRMByte();
+            const dBit = (opcode >>> 1) & 0x01; // Direction bit: 0 = r/m <- reg; 1 = reg <- r/m
+            const wBit = opcode & 0x01;         // Width bit: 0 = 8-bit; 1 = 16/32/64-bit
+
+            let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
+
+            // Use REX.R for the 'reg' field and REX.B for the 'rm' field in ModR/M
+            const regOpFullIndex = modrm.reg + (rex_r << 3);
+
+            const regOpName = this.getRegisterString(regOpFullIndex, sizeBytes, rexPrefix !== 0); // Pass hasRexPrefix
+            
+            // Resolve rmOperand, noting it might be a register or memory
+            const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0); // Pass hasRexPrefixForNaming
+
+            let sourceValue;
+            let destValue;
+            let destOperand; // This will store where the result should be written
+
+            // Determine source and destination based on D-bit
+            if (dBit === 0) { // AND r/m, reg (reg is source, r/m is dest)
+                sourceValue = this.readRegister(regOpName, sizeBytes); // Source is the register specified by ModR/M.reg
+                if (rmOperand.type === 'reg') {
+                    destValue = this.readRegister(rmOperand.name, sizeBytes);
+                    destOperand = rmOperand;
+                } else { // Memory destination
+                    if (sizeBytes === 1) destValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) destValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) destValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) destValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for AND (dBit=0).");
+                    destOperand = rmOperand;
+                }
+            } else { // dBit === 1: AND reg, r/m (r/m is source, reg is dest)
+                destValue = this.readRegister(regOpName, sizeBytes); // Destination is the register specified by ModR/M.reg
+                destOperand = { type: 'reg', name: regOpName }; // Set destination for writing
+
+                if (rmOperand.type === 'reg') {
+                    sourceValue = this.readRegister(rmOperand.name, sizeBytes);
+                } else { // Memory source
+                    if (sizeBytes === 1) sourceValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) sourceValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) sourceValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) sourceValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for AND (dBit=1).");
+                }
+            }
+            
+            const result = destValue & sourceValue; // Perform AND operation
+
+            // For logical operations (AND, OR, XOR), CF and OF are always 0.
+            this.flags.cf = 0;
+            this.flags.of = 0;
+            this.flags.zf = (result === 0n) ? 1 : 0;
+            // SF is set if the most significant bit of the result is 1 (after masking to operand size)
+            const bitWidth = BigInt(sizeBytes * 8);
+            const signBitMask = 1n << (bitWidth - 1n);
+            this.flags.sf = ((result & signBitMask) !== 0n) ? 1 : 0;
+
+            // Write the result back to the destination operand
+            if (destOperand.type === 'reg') {
+                this.writeRegister(destOperand.name, result, sizeBytes);
+            } else { // destOperand.type === 'mem'
+                if (sizeBytes === 1) this.writeVirtualUint8(destOperand.address, Number(result));
+                else if (sizeBytes === 2) this.writeVirtualUint16(destOperand.address, Number(result));
+                else if (sizeBytes === 4) this.writeVirtualUint32(destOperand.address, Number(result));
+                else if (sizeBytes === 8) this.writeVirtualBigUint64(destOperand.address, result);
+                else throw new Error("Unsupported memory write size for AND.");
+            }
+            
+            // Improved logging for AND
+            const destOperandString = destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`;
+            const srcOperandString = (dBit === 0) ? regOpName.toUpperCase() : (rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`);
+            console.log(`Decoded: AND ${destOperandString}, ${srcOperandString} (0x${destValue.toString(16)}n & 0x${sourceValue.toString(16)}n) -> Result: 0x${result.toString(16)}n`);
+            return true;
+        }
+
+        // XOR reg, r/m (0x31 / 0x33)
+        if (opcode === 0x31 || opcode === 0x33) {
+            const modrm = this.readModRMByte();
+            const dBit = (opcode >>> 1) & 0x01; 
+            const wBit = opcode & 0x01;         
+
+            let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
+
+            const regOpFullIndex = modrm.reg + (rex_r << 3);
+            const regOpName = this.getRegisterString(regOpFullIndex, sizeBytes, rexPrefix !== 0); // Pass hasRexPrefix
+            const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0); // Pass hasRexPrefixForNaming
+
+            let sourceValue;
+            let destValue;
+            let destOperand;
+
+            if (rmOperand.type === 'reg') {
+                if (dBit === 0) { 
+                    sourceValue = this.readRegister(regOpName, sizeBytes);
+                    destValue = this.readRegister(rmOperand.name, sizeBytes);
+                    destOperand = rmOperand;
+                } else { 
+                    sourceValue = this.readRegister(rmOperand.name, sizeBytes);
+                    destValue = this.readRegister(regOpName, sizeBytes);
+                    destOperand = { type: 'reg', name: regOpName };
+                }
+            } else { 
+                if (dBit === 0) { 
+                    sourceValue = this.readRegister(regOpName, sizeBytes);
+                    if (sizeBytes === 1) destValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) destValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) destValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) destValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for XOR.");
+                    destOperand = rmOperand;
+                } else { 
+                    if (sizeBytes === 1) sourceValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) sourceValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) sourceValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) sourceValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for XOR.");
+                    destValue = this.readRegister(regOpName, sizeBytes);
+                    destOperand = { type: 'reg', name: regOpName };
+                }
+            }
+            
+            const result = destValue ^ sourceValue; // Perform XOR operation
+
+            this.flags.cf = 0; 
+            this.flags.of = 0; 
+            this.flags.zf = (result === 0n) ? 1 : 0; 
+            this.flags.sf = ((result >> (BigInt(sizeBytes * 8) - 1n)) & 1n) === 1n ? 1 : 0; 
+
+            if (destOperand.type === 'reg') {
+                this.writeRegister(destOperand.name, result, sizeBytes);
+            } else { 
+                if (sizeBytes === 1) this.writeVirtualUint8(destOperand.address, Number(result));
+                else if (sizeBytes === 2) this.writeVirtualUint16(destOperand.address, Number(result));
+                else if (sizeBytes === 4) this.writeVirtualUint32(destOperand.address, Number(result));
+                else if (sizeBytes === 8) this.writeVirtualBigUint64(destOperand.address, result);
+                else throw new Error("Unsupported memory write size for XOR.");
+            }
+            console.log(`Decoded: XOR ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, ${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''} -> Result: 0x${result.toString(16)}n`);
+            return true;
+        }
+
+        // SUB reg, r/m (0x29 / 0x2B)
+        if (opcode === 0x29 || opcode === 0x2B) {
+            const modrm = this.readModRMByte();
+            const dBit = (opcode >>> 1) & 0x01; // Direction bit
+            const wBit = opcode & 0x01;         // Width bit
+
+            let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
+
+            const regOpFullIndex = modrm.reg + (rex_r << 3);
+            const regOpName = this.getRegisterString(regOpFullIndex, sizeBytes, rexPrefix !== 0); // Pass hasRexPrefix
+            const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0); // Pass hasRexPrefixForNaming
+
+            let sourceValue; // Subtrahend
+            let destValue;   // Minuend
+            let destOperand; 
+
+            if (rmOperand.type === 'reg') {
+                if (dBit === 0) { // SUB r/m, reg (reg is subtrahend, r/m is minuend/dest)
+                    sourceValue = this.readRegister(regOpName, sizeBytes);
+                    destValue = this.readRegister(rmOperand.name, sizeBytes);
+                    destOperand = rmOperand; 
+                } else { // SUB reg, r/m (r/m is subtrahend, reg is minuend/dest)
+                    sourceValue = this.readRegister(rmOperand.name, sizeBytes);
+                    destValue = this.readRegister(regOpName, sizeBytes);
+                    destOperand = { type: 'reg', name: regOpName }; 
+                }
+            } else { // rmOperand.type === 'mem'
+                if (dBit === 0) { // SUB r/m, reg (reg is subtrahend, r/m is minuend/dest)
+                    sourceValue = this.readRegister(regOpName, sizeBytes);
+                    if (sizeBytes === 1) destValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) destValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) destValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) destValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for SUB.");
+                    destOperand = rmOperand; 
+                } else { // SUB reg, r/m (r/m is subtrahend, reg is minuend/dest)
+                    if (sizeBytes === 1) sourceValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) sourceValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) sourceValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) sourceValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for SUB.");
+                    destValue = this.readRegister(regOpName, sizeBytes);
+                    destOperand = { type: 'reg', name: regOpName }; 
+                }
+            }
+            
+            const result = destValue - sourceValue;
+            this.updateArithmeticFlags(result, destValue, sourceValue, sizeBytes, 'sub');
+
+            if (destOperand.type === 'reg') {
+                this.writeRegister(destOperand.name, result, sizeBytes);
+            } else { // destOperand.type === 'mem'
+                if (sizeBytes === 1) this.writeVirtualUint8(destOperand.address, Number(result));
+                else if (sizeBytes === 2) this.writeVirtualUint16(destOperand.address, Number(result));
+                else if (sizeBytes === 4) this.writeVirtualUint32(destOperand.address, Number(result));
+                else if (sizeBytes === 8) this.writeVirtualBigUint64(destOperand.address, result);
+                else throw new Error("Unsupported memory write size for SUB.");
+            }
+            console.log(`Decoded: SUB ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, ${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''} -> Result: 0x${result.toString(16)}n`);
+            return true;
+        }
+
+        // CMP reg, r/m; CMP r/m, reg (0x39 / 0x3B for 32/64-bit, 0x38 / 0x3A for 8-bit)
+        if (opcode >= 0x38 && opcode <= 0x3B) {
+            const modrm = this.readModRMByte();
+            const dBit = (opcode >>> 1) & 0x01; // Direction bit
+            const wBit = opcode & 0x01;         // Width bit
+
+            let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
+
+            const regOpFullIndex = modrm.reg + (rex_r << 3);
+            const regOpName = this.getRegisterString(regOpFullIndex, sizeBytes, rexPrefix !== 0); // Pass hasRexPrefix
+            const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0); // Pass hasRexPrefixForNaming
+
+            let sourceValue; // Subtrahend
+            let destValue;   // Minuend
+
+            if (rmOperand.type === 'reg') {
+                if (dBit === 0) { // CMP r/m, reg (reg is subtrahend, r/m is minuend)
+                    sourceValue = this.readRegister(regOpName, sizeBytes);
+                    destValue = this.readRegister(rmOperand.name, sizeBytes);
+                } else { // CMP reg, r/m (r/m is subtrahend, reg is minuend)
+                    sourceValue = this.readRegister(rmOperand.name, sizeBytes);
+                    destValue = this.readRegister(regOpName, sizeBytes);
+                }
+            } else { // rmOperand.type === 'mem'
+                if (dBit === 0) { // CMP r/m, reg (reg is subtrahend, r/m is minuend)
+                    sourceValue = this.readRegister(regOpName, sizeBytes);
+                    if (sizeBytes === 1) destValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) destValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) destValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) destValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for CMP.");
+                } else { // CMP reg, r/m (r/m is subtrahend, reg is minuend)
+                    if (sizeBytes === 1) sourceValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) sourceValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) sourceValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) sourceValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for CMP.");
+                    destValue = this.readRegister(regOpName, sizeBytes);
+                }
+            }
+            
+            // Perform the subtraction for flags, but do not write the result back
+            const result = destValue - sourceValue;
+            this.updateArithmeticFlags(result, destValue, sourceValue, sizeBytes, 'sub');
+
+            const destOperandString = (dBit === 0) ? (rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`) : regOpName.toUpperCase();
+            const srcOperandString = (dBit === 0) ? regOpName.toUpperCase() : (rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`);
+            console.log(`Decoded: CMP ${destOperandString}, ${srcOperandString} (0x${destValue.toString(16)}n - 0x${sourceValue.toString(16)}n)`);
+            return true;
+        }
+
+
+        // MOV r/m, reg; MOV reg, r/m (0x88, 0x89, 0x8A, 0x8B)
+        if (opcode >= 0x88 && opcode <= 0x8B) {
+            const modrm = this.readModRMByte();
+            const dBit = (opcode >>> 1) & 0x01;
+            const wBit = opcode & 0x01;         
+
+            let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
+
+            const regOpFullIndex = modrm.reg + (rex_r << 3);
+            const regOpName = this.getRegisterString(regOpFullIndex, sizeBytes, rexPrefix !== 0); // Pass hasRexPrefix
+
+            const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0); // Pass hasRexPrefixForNaming
+
+            let sourceValue;
+            let destOperand; 
+
+            if (dBit === 0) { 
+                sourceValue = this.readRegister(regOpName, sizeBytes); 
+                destOperand = rmOperand; 
+                console.log(`  Action: R/M(DEST) <- Reg(SRC)`);
+            } else { 
+                if (rmOperand.type === 'reg') {
+                    sourceValue = this.readRegister(rmOperand.name, sizeBytes);
+                } else { 
+                    if (sizeBytes === 1) sourceValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) sourceValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) sourceValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) sourceValue = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size.");
+                }
+                destOperand = { type: 'reg', name: regOpName }; 
+                console.log(`  Action: Reg(DEST) <- R/M(SRC)`);
+            }
+
+            if (destOperand.type === 'reg') {
+                this.writeRegister(destOperand.name, sourceValue, sizeBytes);
+            } else { 
+                if (sizeBytes === 1) this.writeVirtualUint8(destOperand.address, Number(sourceValue));
+                else if (sizeBytes === 2) this.writeVirtualUint16(destOperand.address, Number(sourceValue));
+                else if (sizeBytes === 4) this.writeVirtualUint32(destOperand.address, Number(sourceValue));
+                else if (sizeBytes === 8) this.writeVirtualBigUint64(destOperand.address, sourceValue);
+                else throw new Error("Unsupported memory write size.");
+            }
+
+            console.log(`Decoded: MOV ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, 0x${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''}`);
+            return true;
+        }
+
+        // If an instruction falls through all specific handlers, it's truly unknown
+        console.log(`Unknown opcode: 0x${(twoByteOpcode ? '0F ' : '')}${opcode.toString(16)} at 0x${currentRIPBeforeFetch.toString(16)}`); // Use currentRIPBeforeFetch for unknown opcodes
+        return true;
+    }
+
+    readInstructionByte() {
+        let byte;
+        // Instruction fetches (RIP-relative access) depend on current mode and paging state
+        // If Protected Mode (CR0.PE) is enabled, all accesses are virtual from instruction stream's perspective.
+        // The translateVirtualToPhysical will handle the specific paging checks (PG, PAE, LME).
+        if ((this.cr0 & CPU.CR0_PE) !== 0n) { 
+            byte = this.readVirtualUint8(this.rip);
+        } else { // Real Mode
+            byte = this.memory.readUint8(Number(this.rip));
+        }
+        this.rip++;
+        return byte;
+    }
+
+    readModRMByte() {
+        // ModR/M byte is also part of the instruction stream, so it should use readInstructionByte logic
+        // This ensures it correctly reads from virtual or physical memory.
+        const modrm = this.readInstructionByte(); 
+        const mod = (modrm >>> 6) & 0x03;
+        const reg = (modrm >>> 3) & 0x07;
+        const rm = modrm & 0x07;
+        return { mod, reg, rm, raw: modrm };
+    }
+
+    getRegisterString(regIndex, sizeBytes, hasRexPrefix = false) {
+        const regNames64 = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'];
+        const regNames32 = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi', 'r8d', 'r9d', 'r10d', 'r11d', 'r12d', 'r13d', 'r14d', 'r15d'];
+        const regNames16 = ['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di', 'r8w', 'r9w', 'r10w', 'r11w', 'r12w', 'r13w', 'r14w', 'r15w'];
+        
+        // Arrays for 8-bit register naming based on REX prefix presence
+        const regNames8Low = ['al', 'cl', 'dl', 'bl']; // Indices 0-3 (always same)
+        const regNames8HighNoRex = ['ah', 'ch', 'dh', 'bh']; // Indices 4-7 (if NO REX prefix)
+        const regNames8NewRex = ['spl', 'bpl', 'sil', 'dil']; // Indices 4-7 (if REX prefix IS present)
+        const regNames8Extended = ['r8b', 'r9b', 'r10b', 'r11b', 'r12b', 'r13b', 'r14b', 'r15b']; // Indices 8-15 (always used with REX)
+
+        if (regIndex < 0 || regIndex > 15) {
+            throw new Error(`Invalid register index: ${regIndex}`);
+        }
+
+        switch (sizeBytes) {
+            case 1:
+                if (regIndex >= 8) { // Registers R8B-R15B (always require REX to be accessed by these names)
+                    return regNames8Extended[regIndex - 8];
+                } else if (regIndex >= 4) { // Registers AX/CX/DX/BX's high byte or SPL/BPL/SIL/DIL
+                    if (hasRexPrefix) {
+                        return regNames8NewRex[regIndex - 4];
+                    } else {
+                        return regNames8HighNoRex[regIndex - 4];
+                    }
+                } else { // Registers AL/CL/DL/BL
+                    return regNames8Low[regIndex];
+                }
+            case 2: return regNames16[regIndex];
+            case 4: return regNames32[regIndex];
+            case 8: return regNames64[regIndex];
+            default: throw new Error(`Invalid register size for naming: ${sizeBytes}`);
+        }
+    }
+
+    readSignedImmediate(sizeBytes) {
+        let value;
+        let rawValue; 
+        
+        // Use readVirtualUintX if Protected Mode is enabled, otherwise use physical
+        const getRawValue = (currentRip, numBytes) => {
+            if ((this.cr0 & CPU.CR0_PE) !== 0n) { // If Protected Mode is enabled
+                if (numBytes === 1) return this.readVirtualUint8(currentRip);
+                else if (numBytes === 2) return this.readVirtualUint16(currentRip);
+                else if (numBytes === 4) return this.readVirtualUint32(currentRip);
+                else if (numBytes === 8) return this.readVirtualBigUint64(currentRip); 
+            } else { // Real Mode
+                if (numBytes === 1) return this.memory.readUint8(Number(currentRip));
+                else if (numBytes === 2) return this.memory.readUint16(Number(currentRip));
+                else if (numBytes === 4) return this.memory.readUint32(Number(currentRip));
+                else if (numBytes === 8) return this.memory.readBigUint64(Number(currentRip)); 
+            }
+            throw new Error(`Unsupported size for raw signed immediate read: ${numBytes}`);
+        };
+
+
+        if (sizeBytes === 1) {
+            rawValue = getRawValue(this.rip, 1);
+            this.rip += 1n;
+            value = rawValue;
+            if (value & 0x80) value = value - 0x100; 
+        } else if (sizeBytes === 2) {
+            rawValue = getRawValue(this.rip, 2);
+            this.rip += 2n;
+            value = rawValue;
+            if (value & 0x8000) value = value - 0x10000; 
+        } else if (sizeBytes === 4) {
+            rawValue = getRawValue(this.rip, 4);
+            this.rip += 4n;
+            value = rawValue;
+            if (value & 0x80000000) value = value - 0x100000000; 
+        } else if (sizeBytes === 8) { 
+            rawValue = getRawValue(this.rip, 8);
+            this.rip += 8n;
+            return rawValue; 
+        } else {
+            throw new Error(`Invalid immediate size for signed read: ${sizeBytes}`); 
+        }
+        return BigInt(value); 
+    }
+
+    resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, hasRexPrefixForNaming) { // Added hasRexPrefixForNaming
+        let baseRegName;
+        let effectiveAddress = 0n;
+        let displacement = 0n;
+
+        const rmIndex = modrm.rm + (rex_b << 3);
+
+        if (modrm.mod === 0x03) {
+            // Pass hasRexPrefixForNaming to getRegisterString as this is a register operand
+            return { type: 'reg', name: this.getRegisterString(rmIndex, sizeBytes, hasRexPrefixForNaming) };
+        }
+
+        switch (modrm.mod) {
+            case 0x00: // [reg] or [reg + disp32] or [disp32]
+                if (modrm.rm === 0x04) { // R/M = 100b indicates SIB byte (skip for now)
+                    console.warn("SIB byte detected (Mod=00, R/M=04). SIB not implemented yet. Consuming SIB byte.");
+                    this.readInstructionByte(); 
+                    throw new Error("SIB byte not implemented for Mod=00, R/M=04"); 
+                } else if (modrm.rm === 0x05) { // R/M = 101b indicates absolute 32-bit displacement (RIP-relative in 64-bit, but simpler absolute for now)
+                    displacement = this.readSignedImmediate(4); 
+                    effectiveAddress = displacement; 
+                    console.log(`  Absolute 32-bit address: 0x${effectiveAddress.toString(16)}`);
+                } else { // [base_reg] (Mod=00, no displacement)
+                    // Base registers (RSP, RBP, etc.) are always 64-bit, so hasRexPrefixForNaming isn't strictly needed for their *names*
+                    // but it's passed here for consistency with the `getRegisterString` signature.
+                    baseRegName = this.getRegisterString(rmIndex, 8, false); // For base registers, use 64-bit name, hasRexPrefix isn't relevant for name lookup
+                    effectiveAddress = this.readRegister(baseRegName, 8);
+                    console.log(`  Base Reg: ${baseRegName.toUpperCase()} = 0x${effectiveAddress.toString(16)}`);
+                }
+                break;
+            case 0x01: // [reg + disp8]
+                if (modrm.rm === 0x04) { // R/M = 100b indicates SIB byte
+                    console.warn("SIB byte detected (Mod=01, R/M=04). SIB not implemented yet. Consuming SIB byte.");
+                    this.readInstructionByte(); 
+                    throw new Error("SIB byte not implemented for Mod=01, R/M=04"); 
+                }
+                baseRegName = this.getRegisterString(rmIndex, 8, false); // For base registers, use 64-bit name
+                effectiveAddress = this.readRegister(baseRegName, 8);
+                displacement = this.readSignedImmediate(1); 
+                effectiveAddress = effectiveAddress + displacement;
+                console.log(`  Base Reg: ${baseRegName.toUpperCase()} + Disp8: 0x${displacement.toString(16)} = 0x${effectiveAddress.toString(16)}`);
+                break;
+            case 0x02: // [reg + disp32]
+                if (modrm.rm === 0x04) { // R/M = 100b indicates SIB byte
+                    console.warn("SIB byte detected (Mod=02, R/M=04). SIB not implemented yet. Consuming SIB byte.");
+                    this.readInstructionByte(); 
+                    throw new Error("SIB byte not implemented for Mod=02, R/M=04"); 
+                }
+                baseRegName = this.getRegisterString(rmIndex, 8, false); // For base registers, use 64-bit name
+                effectiveAddress = this.readRegister(baseRegName, 8);
+                displacement = this.readSignedImmediate(4); 
+                effectiveAddress = effectiveAddress + displacement;
+                console.log(`  Base Reg: ${baseRegName.toUpperCase()} + Disp32: 0x${displacement.toString(16)} = 0x${effectiveAddress.toString(16)}`);
+                break;
+        }
+
+        return { type: 'mem', address: effectiveAddress, sizeBytes: sizeBytes };
+    }
+
+    updateCPUMode() {
+        const peBit = (this.cr0 & CPU.CR0_PE) !== 0n;       
+        const pgBit = (this.cr0 & CPU.CR0_PG) !== 0n; 
+        const paeBit = (this.cr4 & CPU.CR4_PAE) !== 0n; 
+        const lmeBit = (this.efer & CPU.EFER_LME) !== 0n; 
+
+        // --- NEW DEBUGGING LOGS ---
+        console.log(`\n--- DEBUG: updateCPUMode called ---`);
+        console.log(`  Current CR0:  0x${this.cr0.toString(16).padStart(16, '0')} (PE: ${peBit}, PG: ${pgBit})`);
+        console.log(`  Current CR4:  0x${this.cr4.toString(16).padStart(16, '0')} (PAE: ${paeBit})`);
+        console.log(`  Current EFER: 0x${this.efer.toString(16).padStart(16, '0')} (LME: ${lmeBit})`);
+        console.log(`  Combined Condition (LME && PAE && PG): ${lmeBit && paeBit && pgBit}`);
+        // --- END DEBUGGING LOGS ---
+    
+        if (!peBit) {
+            this.mode = 'real';
+        } else { 
+            if (lmeBit && paeBit && pgBit) { 
+                this.mode = 'long';
+                console.log("CPU Mode: Long Mode (64-bit) enabled.");
+            } else if (pgBit && paeBit) { 
+                 this.mode = 'protected_pae'; 
+                 console.log("CPU Mode: Protected Mode (32-bit) with PAE enabled.");
+            } else if (pgBit) {
+                this.mode = 'protected_32bit_paging'; 
+                console.log("CPU Mode: Protected Mode (32-bit) with Paging enabled.");
+            } else {
+                this.mode = 'protected'; 
+                console.log("CPU Mode: Protected Mode (32-bit) enabled (no paging).");
+            }
+        }
+        console.log(`DEBUG: updateCPUMode - Mode finalized as: ${this.mode}\n`);
+    }
+
+    readVirtualUint8(virtualAddr) {
+        const physicalAddr = this.translateVirtualToPhysical(virtualAddr, 1, 'read');
+        // Add bounds check for physical memory to catch issues *before* DataView throws
+        if (physicalAddr < 0n || physicalAddr >= BigInt(this.memory.buffer.byteLength)) {
+            console.error(`Attempt to read physical address 0x${physicalAddr.toString(16)} outside memory bounds (0x0 to 0x${BigInt(this.memory.buffer.byteLength).toString(16)}).`);
+            throw new Error(`MEMORY_ACCESS_VIOLATION: Read from physical address 0x${physicalAddr.toString(16)}`);
+        }
+        return this.memory.readUint8(Number(physicalAddr));
+    }
+
+    writeVirtualUint8(virtualAddr, value) {
+        const physicalAddr = this.translateVirtualToPhysical(virtualAddr, 1, 'write');
+        if (physicalAddr < 0n || physicalAddr >= BigInt(this.memory.buffer.byteLength)) {
+            console.error(`Attempt to write physical address 0x${physicalAddr.toString(16)} outside memory bounds (0x0 to 0x${BigInt(this.memory.buffer.byteLength).toString(16)}).`);
+            throw new Error(`MEMORY_ACCESS_VIOLATION: Write to physical address 0x${physicalAddr.toString(16)}`);
+        }
+        this.memory.writeUint8(Number(physicalAddr), value);
+    }
+
+    readVirtualUint16(virtualAddr) {
+        const physicalAddr = this.translateVirtualToPhysical(virtualAddr, 2, 'read');
+        if (physicalAddr < 0n || physicalAddr + 1n >= BigInt(this.memory.buffer.byteLength)) { // +1n for 2-byte read
+            console.error(`Attempt to read physical address 0x${physicalAddr.toString(16)} outside memory bounds.`);
+            throw new Error(`MEMORY_ACCESS_VIOLATION: Read from physical address 0x${physicalAddr.toString(16)}`);
+        }
+        return this.memory.readUint16(Number(physicalAddr));
+    }
+
+    writeVirtualUint16(virtualAddr, value) {
+        const physicalAddr = this.translateVirtualToPhysical(virtualAddr, 2, 'write');
+        if (physicalAddr < 0n || physicalAddr + 1n >= BigInt(this.memory.buffer.byteLength)) { // +1n for 2-byte write
+            console.error(`Attempt to write physical address 0x${physicalAddr.toString(16)} outside memory bounds.`);
+            throw new Error(`MEMORY_ACCESS_VIOLATION: Write to physical address 0x${physicalAddr.toString(16)}`);
+        }
+        this.memory.writeUint16(Number(physicalAddr), value);
+    }
+
+    readVirtualUint32(virtualAddr) {
+        const physicalAddr = this.translateVirtualToPhysical(virtualAddr, 4, 'read');
+        if (physicalAddr < 0n || physicalAddr + 3n >= BigInt(this.memory.buffer.byteLength)) { // +3n for 4-byte read
+            console.error(`Attempt to read physical address 0x${physicalAddr.toString(16)} outside memory bounds.`);
+            throw new Error(`MEMORY_ACCESS_VIOLATION: Read from physical address 0x${physicalAddr.toString(16)}`);
+        }
+        return this.memory.readUint32(Number(physicalAddr));
+    }
+
+    writeVirtualUint32(virtualAddr, value) {
+        const physicalAddr = this.translateVirtualToPhysical(virtualAddr, 4, 'write');
+        if (physicalAddr < 0n || physicalAddr + 3n >= BigInt(this.memory.buffer.byteLength)) { // +3n for 4-byte write
+            console.error(`Attempt to write physical address 0x${physicalAddr.toString(16)} outside memory bounds.`);
+            throw new Error(`MEMORY_ACCESS_VIOLATION: Write to physical address 0x${physicalAddr.toString(16)}`);
+        }
+        this.memory.writeUint32(Number(physicalAddr), value);
+    }
+
+    readVirtualBigUint64(virtualAddr) {
+        const physicalAddr = this.translateVirtualToPhysical(virtualAddr, 8, 'read');
+        if (physicalAddr < 0n || physicalAddr + 7n >= BigInt(this.memory.buffer.byteLength)) { // +7n for 8-byte read
+            console.error(`Attempt to read physical address 0x${physicalAddr.toString(16)} outside memory bounds.`);
+            throw new Error(`MEMORY_ACCESS_VIOLATION: Read from physical address 0x${physicalAddr.toString(16)}`);
+        }
+        return this.memory.readBigUint64(Number(physicalAddr)); 
+    }
+
+    writeVirtualBigUint64(virtualAddr, value) {
+        const physicalAddr = this.translateVirtualToPhysical(virtualAddr, 8, 'write');
+        if (physicalAddr < 0n || physicalAddr + 7n >= BigInt(this.memory.buffer.byteLength)) { // +7n for 8-byte write
+            console.error(`Attempt to write physical address 0x${physicalAddr.toString(16)} outside memory bounds.`);
+            throw new Error(`MEMORY_ACCESS_VIOLATION: Write to physical address 0x${physicalAddr.toString(16)}`);
+        }
+        this.memory.writeBigUint64(Number(physicalAddr), value); 
+    }
+
+    translateVirtualToPhysical(virtualAddr, sizeBytes, accessType) {
+        if (this.mode === 'real') {
+            return virtualAddr;
+        }
+
+        const pgBit = (this.cr0 & CPU.CR0_PG) !== 0n;
+        const paeBit = (this.cr4 & CPU.CR4_PAE) !== 0n;
+        const lmeBit = (this.efer & CPU.EFER_LME) !== 0n;
+
+        // This guard determines when the full 4-level paging logic is active.
+        if (this.mode !== 'long' || !pgBit || !paeBit || !lmeBit) {
+            console.warn(`Paging not fully enabled for Long Mode. Current mode: ${this.mode}. CR0.PG=${pgBit}, CR4.PAE=${paeBit}, EFER.LME=${lmeBit}. Returning virtual as physical.`);
+            return virtualAddr; // Pass through if paging is not fully active
+        }
+
+        // --- Paging Enabled for Long Mode (the real work begins here) ---
+        console.log(`Paging: Translating virtual address 0x${virtualAddr.toString(16)} in ${this.mode} mode.`);
+
+        const pml4BasePhys = this.cr3 & ~0xFFFn;
+        console.log(`  PML4 Base Phys: 0x${pml4BasePhys.toString(16).padStart(16, '0')}`); 
+
+        const pml4Index = (virtualAddr >> 39n) & 0x1FFn; 
+        let pml4eAddr = pml4BasePhys + (pml4Index * 8n); 
+        console.log(`  PML4E Addr: 0x${pml4eAddr.toString(16).padStart(16, '0')} (Index: ${pml4Index})`);
+        let pml4e = this.memory.readBigUint64(Number(pml4eAddr));
+        console.log(`  PML4E Value: 0x${pml4e.toString(16).padStart(16, '0')}`);
+
+        if ((pml4e & CPU.PTE_PRESENT) === 0n) { 
+            console.error(`Page Fault: PML4E not present for VA 0x${virtualAddr.toString(16)} (PML4E_addr=0x${pml4eAddr.toString(16)}, value=0x${pml4e.toString(16)})`);
+            throw new Error(`PAGE_FAULT: PML4E not present for VA 0x${virtualAddr.toString(16)}`);
+        }
+        
+        let pdptBasePhys = pml4e & ~0xFFFn;
+        console.log(`  PDPT Base Phys: 0x${pdptBasePhys.toString(16).padStart(16, '0')}`); 
+        const pdptIndex = (virtualAddr >> 30n) & 0x1FFn; 
+        let pdpteAddr = pdptBasePhys + (pdptIndex * 8n); 
+        console.log(`  PDPTE Addr: 0x${pdpteAddr.toString(16).padStart(16, '0')} (Index: ${pdptIndex})`);
+        let pdpte = this.memory.readBigUint64(Number(pdpteAddr));
+        console.log(`  PDPTE Value: 0x${pdpte.toString(16).padStart(16, '0')}`);
+
+        if ((pdpte & CPU.PTE_PRESENT) === 0n) {
+            console.error(`Page Fault: PDPTE not present for VA 0x${virtualAddr.toString(16)} (PDPTE_addr=0x${pdpteAddr.toString(16)}, value=0x${pdpte.toString(16)})`);
+            throw new Error(`PAGE_FAULT: PDPTE not present for VA 0x${virtualAddr.toString(16)}`);
+        }
+
+        if ((pdpte & CPU.PTE_PAGE_SIZE) !== 0n) { // 1GB page
+            const pageBaseAddr = pdpte & 0xFFFFFFFC0000000n; 
+            const offset = virtualAddr & 0x3FFFFFFFfn; 
+            const physical = pageBaseAddr | offset;
+            console.log(`  Translated 1GB page: VA 0x${virtualAddr.toString(16)} -> PA 0x${physical.toString(16)}`);
+            return physical;
+        }
+
+        let pdBasePhys = pdpte & ~0xFFFn;
+        console.log(`  PD Base Phys: 0x${pdBasePhys.toString(16).padStart(16, '0')}`); 
+        const pdIndex = (virtualAddr >> 21n) & 0x1FFn; 
+        let pdeAddr = pdBasePhys + (pdIndex * 8n); 
+        console.log(`  PDE Addr: 0x${pdeAddr.toString(16).padStart(16, '0')} (Index: ${pdIndex})`);
+        let pde = this.memory.readBigUint64(Number(pdeAddr));
+        console.log(`  PDE Value: 0x${pde.toString(16).padStart(16, '0')}`);
+
+        if ((pde & CPU.PTE_PRESENT) === 0n) {
+            console.error(`Page Fault: PDE not present for VA 0x${virtualAddr.toString(16)} (PDE_addr=0x${pdeAddr.toString(16)}, value=0x${pde.toString(16)})`);
+            throw new Error(`PAGE_FAULT: PDE not present for VA 0x${virtualAddr.toString(16)}`);
+        }
+
+        if ((pde & CPU.PTE_PAGE_SIZE) !== 0n) { // 2MB page
+            const pageBaseAddr = pde & 0xFFFFFFFE00000n; 
+            const offset = virtualAddr & 0x1FFFFFn; 
+            const physical = pageBaseAddr | offset;
+            console.log(`  Translated 2MB page: VA 0x${virtualAddr.toString(16)} -> PA 0x${physical.toString(16)}`);
+            return physical;
+        }
+
+        let ptBasePhys = pde & ~0xFFFn;
+        console.log(`  PT Base Phys: 0x${ptBasePhys.toString(16).padStart(16, '0')}`); 
+        const ptIndex = (virtualAddr >> 12n) & 0x1FFn; 
+        let pteAddr = ptBasePhys + (ptIndex * 8n); 
+        console.log(`  PTE Addr: 0x${pteAddr.toString(16).padStart(16, '0')} (Index: ${ptIndex})`);
+        let pte = this.memory.readBigUint64(Number(pteAddr));
+        console.log(`  PTE Value: 0x${pte.toString(16).padStart(16, '0')}`);
+
+        if ((pte & CPU.PTE_PRESENT) === 0n) {
+            console.error(`Page Fault: PTE not present for VA 0x${virtualAddr.toString(16)} (PTE_addr=0x${pteAddr.toString(16)}, value=0x${pte.toString(16)})`);
+            throw new Error(`PAGE_FAULT: PTE not present for VA 0x${virtualAddr.toString(16)}`);
+        }
+
+        const pageBaseAddr = pte & ~0xFFFn; 
+        const offset = virtualAddr & 0xFFFn; 
+        const physical = pageBaseAddr | offset;
+        console.log(`  Final Page Base Addr: 0x${pageBaseAddr.toString(16).padStart(16, '0')}`);
+        console.log(`  Page Offset: 0x${offset.toString(16).padStart(3, '0')}`);
+        console.log(`  Calculated Physical: 0x${physical.toString(16).padStart(16, '0')}`);
+
+        return physical;
+    }
+}

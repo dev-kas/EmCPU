@@ -1,0 +1,13 @@
+{
+  "name": "emcpu",
+  "version": "1.0.0",
+  "description": "Pure JavaScript CPU emulator with compatibility for the Web.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node ."
+  },
+  "keywords": [],
+  "author": "dev-kas",
+  "license": "ISC",
+  "type": "module"
+}
