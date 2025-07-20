@@ -1,4 +1,3 @@
-// index.js
 import { CPU } from "./cpu.js";
 import { Memory } from "./memory.js";
 
@@ -31,7 +30,7 @@ async function runEmulator() {
     );
     cpu.cr3 = pml4PhysAddr; 
 
-    const bootSectorData = new Uint8Array(fs.readFileSync('bootsector.bin'));
+    const bootSectorData = new Uint8Array(fs.readFileSync('out/boot.bin'));
     memory.load(0x7C00, bootSectorData); 
     cpu.rip = 0x7C00n; 
 
