@@ -221,9 +221,8 @@ export class CPU {
             this[fullReg] = (currentVal & ~0xFFFFn) | (valToWrite & 0xFFFFn);
         } else if (sizeBytes === 4) {
             // EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI, R8D-R15D
-            // Clear the lowest 32 bits, then set the new one. Upper bits untouched.
-            // this[fullReg] = (currentVal & ~0xFFFFFFFFn) | (valToWrite & 0xFFFFFFFFn);
-            this[fullReg] = valToWrite & 0xFFFFFFFFn;
+            // In 64-bit mode, writing to a 32-bit register (like EAX) zeros the upper 32 bits of the 64-bit register (RAX).
+            this[fullReg] = valToWrite & 0xFFFFFFFFn; // THIS IS THE CRITICAL CHANGE
         } else if (sizeBytes === 8) {
             // RAX, RCX, etc. Full 64-bit write.
             this[fullReg] = valToWrite;
@@ -397,7 +396,31 @@ export class CPU {
                 }
                 return true;
             }
-            // Add other 2-byte opcodes here as you implement them (e.g., specific Jcc, SETcc, etc.)
+            // JE/JZ (0x0F 84) - near jump with 32-bit displacement
+            if (opcode === 0x84) {
+                const displacement = this.readSignedImmediate(4); // Read 32-bit signed displacement
+                console.log(`Decoded: JE/JZ rel32 0x${displacement.toString(16)} (RIP adjusted)`);
+                if (this.flags.zf === 1) {
+                    this.rip += displacement; // Apply displacement if ZF is set
+                    console.log(`  Condition Met (ZF=1). Jumping to 0x${this.rip.toString(16)}`);
+                } else {
+                    console.log(`  Condition Not Met (ZF=0). Not jumping.`);
+                }
+                return true;
+            }
+            // JNE/JNZ (0x0F 85) - near jump with 32-bit displacement
+            if (opcode === 0x85) {
+                const displacement = this.readSignedImmediate(4); // Read 32-bit signed displacement
+                console.log(`Decoded: JNE/JNZ rel32 0x${displacement.toString(16)} (RIP adjusted)`);
+                if (this.flags.zf === 0) {
+                    this.rip += displacement; // Apply displacement if ZF is clear
+                    console.log(`  Condition Met (ZF=0). Jumping to 0x${this.rip.toString(16)}`);
+                } else {
+                    console.log(`  Condition Not Met (ZF=1). Not jumping.`);
+                }
+                return true;
+            }
+            // TODO: Implement other 2-byte Jcc instructions here (e.g., JCC, JNC, JS, JNS, JO, JNO, JP, JNP, JL, JGE, JLE, JG)
 
             // If a two-byte opcode is not handled here, it's genuinely unknown
             console.log(`Unknown 2-byte opcode: 0x0F ${opcode.toString(16)} at 0x${currentRIPBeforeFetch.toString(16)}`);
@@ -417,6 +440,34 @@ export class CPU {
             console.log("HLT instruction encountered. Emulation halted.");
             return false;
         }
+
+        // Conditional Jumps (short form: Jcc rel8)
+        // These take a 1-byte signed relative displacement.
+        // JE/JZ (0x74)
+        if (opcode === 0x74) {
+            const displacement = this.readSignedImmediate(1); // Read 1-byte signed displacement
+            console.log(`Decoded: JE/JZ rel8 0x${displacement.toString(16)} (RIP adjusted)`);
+            if (this.flags.zf === 1) {
+                this.rip += displacement; // Apply displacement if ZF is set
+                console.log(`  Condition Met (ZF=1). Jumping to 0x${this.rip.toString(16)}`);
+            } else {
+                console.log(`  Condition Not Met (ZF=0). Not jumping.`);
+            }
+            return true;
+        }
+        // JNE/JNZ (0x75)
+        if (opcode === 0x75) {
+            const displacement = this.readSignedImmediate(1); // Read 1-byte signed displacement
+            console.log(`Decoded: JNE/JNZ rel8 0x${displacement.toString(16)} (RIP adjusted)`);
+            if (this.flags.zf === 0) {
+                this.rip += displacement; // Apply displacement if ZF is clear
+                console.log(`  Condition Met (ZF=0). Jumping to 0x${this.rip.toString(16)}`);
+            } else {
+                console.log(`  Condition Not Met (ZF=1). Not jumping.`);
+            }
+            return true;
+        }
+        // TODO: Implement other short Jcc instructions here (e.g., JL, JG, JNC, etc.)
 
         // Universal MOV reg, imm (0xB0 - 0xBF)
         if (opcode >= 0xB0 && opcode <= 0xBF) {

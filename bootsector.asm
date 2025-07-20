@@ -1,106 +1,80 @@
-bits 64
+bits 64 ; Ensure NASM generates 64-bit code
 
-; Boot sector code that matches the binary instructions from index.js
-; This code will be loaded at 0x7C00 and run in long mode
+; We expect to be loaded at 0x7C00
+org 0x7C00
 
 _start:
-    ; Initialize registers with test values
-    mov al, 0xAA          ; RAX becomes 0x...AA
-    mov ecx, 0xDEADBEEF   ; RCX becomes 0x...DEADBEEF
-    
-    ; Test register moves
-    mov rcx, rax          ; RCX = 0x200AA (from previous RAX value)
-    mov rdx, r8           ; RDX = 0x10000 (from R8)
+    ; --- Minimal Long Mode Setup ---
+    ; These instructions are essential and already handled by the emulator.
+    ; They establish the 64-bit execution environment with paging.
 
-    ; Test memory access
-    mov rdi, [r8 + 0x20]  ; RDI = [0x10020] = 0xAABBCCDDEEFF0011
-    mov [rcx + 0x100], rdx ; [0x201AA] = 0x10000
-
-    ; Enable Long Mode Paging
-    ; Set up EFER MSR (0xC0000080)
+    ; Setup EFER MSR (0xC0000080) for Long Mode Enable (LME=1)
     mov rax, 0xC0000080  ; EFER MSR address
-    mov rcx, rax
-    mov rax, 0x101       ; EFER value (LME=1, SCE=1)
-    xor rdx, rdx         ; Upper 32 bits of EFER (0x31 D2)
-    wrmsr
+    mov rcx, rax         ; RCX holds MSR address for WRMSR
+    mov rax, 0x101       ; EFER value (LME=1, SCE=1 for syscall/sysret if needed later)
+    xor rdx, rdx         ; Upper 32 bits of RDX for WRMSR (set to 0)
+    wrmsr                ; EFER is now set, LME is enabled. CPU is still in protected mode for now.
 
     ; Enable paging (set CR0.PG=1, PE=1)
+    ; PE bit (CR0.0) needs to be set to enter protected mode
+    ; PG bit (CR0.31) needs to be set to enable paging
     mov rax, 0x80000001  ; CR0.PG=1, CR0.PE=1
-    mov cr0, rax
+    mov cr0, rax         ; Protected mode and paging enabled
 
     ; Set PAE bit in CR4
-    mov rdi, 0x20        ; CR4.PAE=1
-    mov cr4, rdi
+    ; PAE bit (CR4.5) enables Physical Address Extension for 4-level paging.
+    mov rax, 0x20        ; CR4.PAE=1
+    mov cr4, rax         ; Long mode is now active (assuming LME, PAE, PG are all set)
 
-    ; --- NEW ARITHMETIC/LOGIC INSTRUCTIONS ---
-    ; CPU is in Long Mode with Paging from this point (~0x7C3A)
+    ; --- End Long Mode Setup ---
 
-    ; Test 1: ADD RAX, RBX (Positive, No Overflow)
-    ; RAX = 5, RBX = 3 => RAX = 8. Flags: ZF=0, SF=0, CF=0, OF=0
+    ; --- Conditional Jump Tests ---
+
+    ; Test 1: ZF = 1 Scenario (A == B)
+    mov r8, 0x1111111122222222 ; Marker for this test block
     mov rax, 0x5
-    mov rbx, 0x3
-    add rax, rbx ; RAX = 8
+    mov rbx, 0x5
+    cmp rax, rbx ; RAX - RBX = 0, so ZF = 1
 
-    ; Test 2: SUB RCX, RDX (RCX = -1 (32-bit), RDX = 1 (32-bit) => RCX = -2)
-    ; RCX=0xFFFFFFFF (as 32-bit value, in 64-bit register it's 0x...FFFFFFFF)
-    ; RDX=0x1
-    ; SUB RCX, RDX => 0xFFFFFFFE (as 32-bit value)
-    ; Flags (for 32-bit subtraction): ZF=0, SF=1, CF=1, OF=0
-    mov ecx, 0xFFFFFFFF 
-    mov edx, 0x1        
-    sub ecx, edx        ; ECX = 0xFFFFFFFE
+    ; Test 1.1: JE/JZ - Should JUMP (ZF is 1)
+    mov r10, 0xDEADBEEFDEADBEEF ; Value if not jumped
+    je  .je_target_success      ; This jump should be taken
+    mov r10, 0x1111111111111111 ; This line should be SKIPPED
+.je_target_success:
+    mov r10, 0xAAAAAAAABBBBBBBB ; R10 should be this value (success)
 
-    ; Test 3: ADD RAX, RBX (Signed Overflow)
-    ; RAX = 0x7FFFFFFF_FFFFFFFF (Max positive 64-bit signed)
-    ; RBX = 0x1
-    ; ADD RAX, RBX => 0x80000000_00000000 (Min negative 64-bit signed)
-    ; Flags (for 64-bit add): ZF=0, SF=1, CF=0, OF=1
-    mov rax, 0x7FFFFFFFFFFFFFFF
-    mov rbx, 0x1
-    add rax, rbx ; RAX = 0x8000000000000000
+    ; Test 1.2: JNE/JNZ - Should NOT JUMP (ZF is 1)
+    mov r11, 0xCAFECAFECAFECAFE ; Value if not jumped
+    jne .jne_target_skipped     ; This jump should NOT be taken (ZF is 1)
+    mov r11, 0xBBBBBBBBCCCCCCCC ; This line should be EXECUTED
+.jne_target_skipped: ; This label is just to provide a target, should be reached sequentially
+    mov r11, 0xDDDDDDDDDDDDDDDD ; R11 should be 0xBBBB... (from previous line) because jump was skipped
 
-    ; Test 4: SUB RDI, R8 (Signed Underflow)
-    ; RDI = 0x80000000_00000000 (Min negative 64-bit signed)
-    ; R8 = 0x1
-    ; SUB RDI, R8 => 0x7FFFFFFF_FFFFFFFF (Max positive 64-bit signed, overflows)
-    ; Flags (for 64-bit sub): ZF=0, SF=0, CF=1, OF=1
-    mov rdi, 0x8000000000000000 ; Make sure RDI has this value, not previous 0xAABB...
-    mov r8, 0x1
-    sub rdi, r8 ; RDI = 0x7FFFFFFFFFFFFFFF
 
-    ; Test 5: AND RAX, RBX
-    ; RAX = 0xF0F0, RBX = 0x0F0F => RAX = 0x0000. Flags: ZF=1, SF=0, CF=0, OF=0
-    mov ax, 0xF0F0
-    mov bx, 0x0F0F
-    and ax, bx ; AX = 0x0000
+    ; Test 2: ZF = 0 Scenario (A != B)
+    mov r12, 0x3333333344444444 ; Marker for this test block
+    mov rax, 0x10
+    mov rbx, 0x5
+    cmp rax, rbx ; RAX - RBX = 5, so ZF = 0
 
-    ; Test 6: OR RCX, RDX
-    ; RCX = 0x11223344, RDX = 0x55667788 => RCX = 0x55667788
-    ; Flags: ZF=0, SF=0, CF=0, OF=0
-    mov ecx, 0x11223344
-    mov edx, 0x55667788
-    or ecx, edx ; ECX = 0x55667788 | 0x11223344 = 0x55667788
+    ; Test 2.1: JE/JZ - Should NOT JUMP (ZF is 0)
+    mov r13, 0xDEADBEEFDEADBEEF ; Value if not jumped
+    je .je_target_skipped_2     ; This jump should NOT be taken (ZF is 0)
+    mov r13, 0xEEEEEEEEFFFFFFFF ; This line should be EXECUTED
+.je_target_skipped_2: ; This label is just to provide a target, should be reached sequentially
+    mov r13, 0x0000000012345678 ; R13 should be 0xEEEE... (from previous line) because jump was skipped
 
-    ; Test 7: CMP RAX, RBX (RAX = 10, RBX = 10)
-    ; RAX = 10, RBX = 10. Flags based on 10 - 10 = 0: ZF=1, SF=0, CF=0, OF=0
-    mov rax, 0xA
-    mov rbx, 0xA
-    cmp rax, rbx ; Flags set for (0xA - 0xA = 0)
+    ; Test 2.2: JNE/JNZ - Should JUMP (ZF is 0)
+    mov r14, 0xCAFECAFECAFECAFE ; Value if not jumped
+    jne .jne_target_success_2   ; This jump should be taken
+    mov r14, 0x9999999999999999 ; This line should be SKIPPED
+.jne_target_success_2:
+    mov r14, 0x0000000000000000 ; R14 should be this value (success)
 
-    ; Test 8: CMP RDX, R8 (RDX = 20, R8 = 10)
-    ; RDX = 20, R8 = 10. Flags based on 20 - 10 = 10: ZF=0, SF=0, CF=0, OF=0
-    mov rdx, 0x14
-    mov r8, 0xA
-    cmp rdx, r8 ; Flags set for (0x14 - 0xA = 0xA)
 
-    ; Test 9: CMP RDI, R8 (RDI = 10, R8 = 20)
-    ; RDI = 10, R8 = 20. Flags based on 10 - 20 = -10 (0xFF...F6 for 64-bit): ZF=0, SF=1, CF=1, OF=0
-    mov rdi, 0xA
-    mov r8, 0x14
-    cmp rdi, r8 ; Flags set for (0xA - 0x14 = -0xA)
-
+    ; Final NOP and HLT
     nop ; To ensure final RIP translation and instruction fetch
-    hlt
+    hlt ; End emulation
 
 ; Boot sector padding and signature
 times 510-($-$$) db 0

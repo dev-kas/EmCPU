@@ -28,7 +28,7 @@ A pure JavaScript implementation of an x86-64 CPU emulator with support for prot
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/emcpu.git
+   git clone https://github.com/dev-kas/emcpu.git
    cd emcpu
    ```
 
