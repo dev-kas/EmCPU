@@ -109,7 +109,7 @@ export class CPU {
 
             // For detailed debugging, log every 100th page, or specific pages (like 0x7C00 or 0x8000)
             if (i % 100n === 0n || currentVirtualPage === 0x7C00n || currentVirtualPage === 0x8000n) { 
-                 writeAndVerifyPTE(pteWriteAddr, pte_value, `PTE for VA 0x${currentVirtualPage.toString(16)}`);
+                writeAndVerifyPTE(pteWriteAddr, pte_value, `PTE for VA 0x${currentVirtualPage.toString(16)}`);
             } else {
                 // If not logging, just perform the write
                 memory.writeBigUint64(Number(pteWriteAddr), pte_value);
@@ -580,6 +580,17 @@ export class CPU {
             return true;
         }
 
+        // ADD EAX, imm32 (0x05)
+        if (opcode === 0x05) {
+            const imm32 = this.readSignedImmediate(4);
+            const eaxValue = this.readRegister('eax', 4);
+            const result = eaxValue + imm32;
+            this.updateArithmeticFlags(result, eaxValue, imm32, 4, 'add');
+            this.writeRegister('eax', result, 4);
+            console.log(`Decoded: ADD EAX, 0x${imm32.toString(16)} (Result: 0x${result.toString(16)})`);
+            return true;
+        }
+
         // OR reg, r/m; OR r/m, reg (0x09 / 0x0B for 16/32/64-bit, 0x08 / 0x0A for 8-bit)
         if (opcode >= 0x08 && opcode <= 0x0B) {
             const modrm = this.readModRMByte();
@@ -913,6 +924,26 @@ export class CPU {
             return true;
         }
 
+        // CMP r/m32, imm32 (0x81 /7)
+        if (opcode === 0x81) {
+            const modrm = this.readModRMByte();
+            if (modrm.reg === 7) {
+                const imm32 = this.readSignedImmediate(4);
+                let sizeBytes = 4;
+                const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
+
+                let destValue;
+                if (rmOperand.type === 'reg') {
+                    destValue = this.readRegister(rmOperand.name, sizeBytes);
+                } else {
+                    destValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                }
+                const result = destValue - imm32;
+                this.updateArithmeticFlags(result, destValue, imm32, sizeBytes, 'sub');
+                console.log(`Decoded: CMP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`}, 0x${imm32.toString(16)}`);
+                return true;
+            }
+        }
 
         // MOV r/m, reg; MOV reg, r/m (0x88, 0x89, 0x8A, 0x8B)
         if (opcode >= 0x88 && opcode <= 0x8B) {
@@ -961,6 +992,160 @@ export class CPU {
             console.log(`Decoded: MOV ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, 0x${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''}`);
             return true;
         }
+
+               // PUSH reg (0x50 + reg_index)
+            if (opcode >= 0x50 && opcode <= 0x57) {
+                const regIdx = opcode - 0x50;
+                const sizeBytes = 8;
+                const regName = this.getRegisterString(regIdx, sizeBytes, rexPrefix !== 0);
+                const value = this.readRegister(regName, sizeBytes);
+                console.log(`PUSH ${regName.toUpperCase()} - RSP Before: 0x${this.rsp.toString(16)}`);
+                this.rsp -= BigInt(sizeBytes);
+                this.writeVirtualBigUint64(this.rsp, value);
+                console.log(`Decoded: PUSH ${regName.toUpperCase()} (0x${value.toString(16)}n)`);
+                console.log(`PUSH ${regName.toUpperCase()} - RSP After: 0x${this.rsp.toString(16)}`);
+                return true;
+            }
+    
+            // PUSH r/m (0xFF /6)
+            if (opcode === 0xFF) {
+                const modrm = this.readModRMByte();
+                if (modrm.reg === 6) { // PUSH r/m
+                    let sizeBytes = defaultOperandSize;
+                    const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
+                    
+                    let value;
+                    if (rmOperand.type === 'reg') {
+                        value = this.readRegister(rmOperand.name, sizeBytes);
+                    } else {
+                        if (sizeBytes === 1) value = BigInt(this.readVirtualUint8(rmOperand.address));
+                        else if (sizeBytes === 2) value = BigInt(this.readVirtualUint16(rmOperand.address));
+                        else if (sizeBytes === 4) value = BigInt(this.readVirtualUint32(rmOperand.address));
+                        else if (sizeBytes === 8) value = this.readVirtualBigUint64(rmOperand.address);
+                        else throw new Error("Unsupported memory read size for PUSH r/m.");
+                    }
+                    console.log(`PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP Before: 0x${this.rsp.toString(16)}`);
+                    this.rsp -= BigInt(sizeBytes);
+                    this.writeVirtualBigUint64(this.rsp, value);
+                    
+                    console.log(`Decoded: PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (0x${value.toString(16)}n)`);
+                    console.log(`PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP After: 0x${this.rsp.toString(16)}`);
+                    return true;
+                }
+            }
+    
+            // POP reg (0x58 + reg_index)
+            if (opcode >= 0x58 && opcode <= 0x5F) {
+                const regIdx = opcode - 0x58;
+                const sizeBytes = 8;
+                const regName = this.getRegisterString(regIdx, sizeBytes, rexPrefix !== 0);
+                console.log(`POP ${regName.toUpperCase()} - RSP Before: 0x${this.rsp.toString(16)}`);
+                const value = this.readVirtualBigUint64(this.rsp);
+                this.writeRegister(regName, value, sizeBytes);
+                this.rsp += BigInt(sizeBytes);
+                
+                console.log(`Decoded: POP ${regName.toUpperCase()} (0x${value.toString(16)}n)`);
+                console.log(`POP ${regName.toUpperCase()} - RSP After: 0x${this.rsp.toString(16)}`);
+                return true;
+            }
+    
+            // POP r/m (0x8F /0)
+            if (opcode === 0x8F) {
+                const modrm = this.readModRMByte();
+                if (modrm.reg === 0) { // POP r/m
+                    let sizeBytes = defaultOperandSize;
+                    const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
+                    
+                    console.log(`POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP Before: 0x${this.rsp.toString(16)}`);
+                    this.rsp += BigInt(sizeBytes);
+                    this.writeRegister(rmOperand.name, value, sizeBytes);
+    
+                    let value;
+                    if (rmOperand.type === 'reg') {
+                        value = this.readRegister(rmOperand.name, sizeBytes);
+                    } else {
+                        if (sizeBytes === 1) value = BigInt(this.readVirtualUint8(rmOperand.address));
+                        else if (sizeBytes === 2) value = BigInt(this.readVirtualUint16(rmOperand.address));
+                        else if (sizeBytes === 4) value = BigInt(this.readVirtualUint32(rmOperand.address));
+                        else if (sizeBytes === 8) value = this.readVirtualBigUint64(rmOperand.address);
+                        else throw new Error("Unsupported memory read size for POP r/m.");
+                    }
+    
+                    console.log(`Decoded: POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (0x${value.toString(16)}n)`);
+                    console.log(`POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP After: 0x${this.rsp.toString(16)}`);
+                    return true;
+                }
+            }
+    
+            // CALL rel32 (0xE8) - Near, relative, 32-bit displacement
+            if (opcode === 0xE8) {
+                const displacement = this.readSignedImmediate(4);
+                const retAddr = this.rip;
+                console.log(`CALL rel32 - RSP Before: 0x${this.rsp.toString(16)}`);
+                this.rsp -= 8n;
+                this.writeVirtualBigUint64(this.rsp, retAddr);
+                this.rip += BigInt(displacement);
+    
+                console.log(`Decoded: CALL rel32 0x${displacement.toString(16)} (RIP adjusted to 0x${this.rip.toString(16)})`);
+                console.log(`CALL rel32 - RSP After: 0x${this.rsp.toString(16)}`);
+                return true;
+            }
+    
+            // CALL r/m (0xFF /2) - Near, absolute, indirect
+            if (opcode === 0xFF) {
+                const modrm = this.readModRMByte();
+                if (modrm.reg === 2) { // opcode extension /2
+                    let sizeBytes = defaultOperandSize;
+                    const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
+                    
+                    let tgtAddr;
+                    if (rmOperand.type === 'reg') {
+                        tgtAddr = this.readRegister(rmOperand.name, sizeBytes);
+                    } else {
+                        if (sizeBytes === 1) tgtAddr = BigInt(this.readVirtualUint8(rmOperand.address));
+                        else if (sizeBytes === 2) tgtAddr = BigInt(this.readVirtualUint16(rmOperand.address));
+                        else if (sizeBytes === 4) tgtAddr = BigInt(this.readVirtualUint32(rmOperand.address));
+                        else if (sizeBytes === 8) tgtAddr = this.readVirtualBigUint64(rmOperand.address);
+                        else throw new Error("Unsupported memory read size for CALL r/m.");
+                    }
+                    
+                    const retAddr = this.rip;
+                    console.log(`CALL r/m - RSP Before: 0x${this.rsp.toString(16)}`);
+                    this.rsp -= 8n;
+                    this.writeVirtualBigUint64(this.rsp, retAddr);
+                    this.rip = tgtAddr;
+    
+                    console.log(`Decoded: CALL ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (Indirect, jumping to 0x${this.rip.toString(16)})`);
+                    console.log(`CALL r/m - RSP After: 0x${this.rsp.toString(16)}`);
+                    return true;
+                }
+            }
+    
+            // RET (0xC3) - Near return
+            if (opcode === 0xC3) {
+                console.log(`RET - RSP Before: 0x${this.rsp.toString(16)}`);
+                const retAddr = this.readVirtualBigUint64(this.rsp);
+                this.rsp += 8n;
+                this.rip = retAddr;
+    
+                console.log(`Decoded: RET (Near, jumping to 0x${this.rip.toString(16)})`);
+                console.log(`RET - RSP After: 0x${this.rsp.toString(16)}`);
+                return true;
+            }
+    
+            // RET imm16 (0xC2) - Near, return with immediate
+            if (opcode === 0xC2) {
+                const imm16 = this.readSignedImmediate(2);
+                console.log(`RET imm16 - RSP Before: 0x${this.rsp.toString(16)}`);
+                const retAddr = this.readVirtualBigUint64(this.rsp);
+                this.rsp += 8n;
+                this.rip = retAddr;
+                this.rsp += BigInt(imm16);
+    
+                console.log(`Decoded: RET imm16 (jumping to 0x${this.rip.toString(16)}, stack adjust by 0x${imm16.toString(16)})`);
+                console.log(`RET imm16 - RSP After: 0x${this.rsp.toString(16)}`);
+                return true;
+            }
 
         // If an instruction falls through all specific handlers, it's truly unknown
         console.log(`Unknown opcode: 0x${(twoByteOpcode ? '0F ' : '')}${opcode.toString(16)} at 0x${currentRIPBeforeFetch.toString(16)}`); // Use currentRIPBeforeFetch for unknown opcodes
@@ -1152,8 +1337,8 @@ export class CPU {
                 this.mode = 'long';
                 console.log("CPU Mode: Long Mode (64-bit) enabled.");
             } else if (pgBit && paeBit) { 
-                 this.mode = 'protected_pae'; 
-                 console.log("CPU Mode: Protected Mode (32-bit) with PAE enabled.");
+                this.mode = 'protected_pae'; 
+                console.log("CPU Mode: Protected Mode (32-bit) with PAE enabled.");
             } else if (pgBit) {
                 this.mode = 'protected_32bit_paging'; 
                 console.log("CPU Mode: Protected Mode (32-bit) with Paging enabled.");
