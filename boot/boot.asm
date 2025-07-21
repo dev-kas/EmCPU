@@ -3,54 +3,53 @@ org 0x7C00
 
 _start:
     ; --- Minimal Long Mode Setup ---
-    ; These instructions are essential and already handled by the emulator.
-    ; They establish the 64-bit execution environment with paging.
-
-    ; Setup EFER MSR (0xC0000080) for Long Mode Enable (LME=1)
     mov rax, 0xC0000080
     mov rcx, rax
     mov rax, 0x101
     xor rdx, rdx
     wrmsr
-
-    ; Enable paging (CR0.PG=1, PE=1)
     mov rax, 0x80000001
     mov cr0, rax
-
-    ; Enable PAE in CR4
     mov rax, 0x20
     mov cr4, rax
 
-    ; --- End Long Mode Setup ---
-
-    ; Setup stack
-    mov rsp, 0x7B00
+    mov rsp, 0x7c00
     mov rbp, rsp
-    ; --- End Setup Stack ---
 
-    mov rax, 0x00
-    mov rbx, 0x00
-    mov rcx, 0x00
-    mov rdx, 0x00
+    ; --- Run Test ---
     call _main
-
-    ; --- End ---
-    nop
     hlt
 
 _main:
-    jmp _loop
+    ; --- SHL Test ---
+    ; Start with the number 13 (0b1101)
+    mov rax, 13
+    
+    ; Shift left by 3 bits.
+    ; 13 * (2^3) = 13 * 8 = 104
+    ; Binary: 0b1101 -> 0b1101000
+    ; Hex: 0x68
+    shl rax, 3
+    
+    ; --- Verification ---
+    ; Check if RAX now holds the correct value, 104.
+    cmp rax, 104
+    je .success
 
-    mov rax, 0x0
-    mov rbx, 0x1
-    mov rcx, 0x7
-    _loop:
-        add rax, rbx
-        cmp rax, rcx
-        jne _loop
+.failure:
+    mov rcx, 0xDEADBEEF  ; Indicate failure
+    jmp .end
 
-    _exit:
-        ret
+.success:
+    mov rcx, 0xCAFEBABE  ; Indicate pass
+    
+.end:
+    ret
 
 times 510-($-$$) db 0
 dw 0xAA55
+
+; How to Confirm It Works:
+;     Your `SHL` implementation must correctly read the immediate value (`3`) and
+;     perform the bitwise shift on the value in `RAX`. The result should be written back to `RAX`.
+;     The final comparison will pass if the math is correct, setting `RCX` to `0xCAFEBABE`.

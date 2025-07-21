@@ -6,3 +6,6 @@ build:
 run:
 	npm start
 .PHONY: run
+
+dev: build run
+.PHONY: dev

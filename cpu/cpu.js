@@ -424,7 +424,7 @@ export class CPU {
 
             // If a two-byte opcode is not handled here, it's genuinely unknown
             console.log(`Unknown 2-byte opcode: 0x0F ${opcode.toString(16)} at 0x${currentRIPBeforeFetch.toString(16)}`);
-            return true; // Or false if you want to halt on unknown 2-byte opcodes
+            return false; // Or false if you want to halt on unknown 2-byte opcodes
         }
 
         // Priority 2: Handle single-byte opcodes (only if not a two-byte opcode)
@@ -455,6 +455,7 @@ export class CPU {
             }
             return true;
         }
+
         // JNE/JNZ (0x75)
         if (opcode === 0x75) {
             const displacement = this.readSignedImmediate(1); // Read 1-byte signed displacement
@@ -467,7 +468,6 @@ export class CPU {
             }
             return true;
         }
-        // TODO: Implement other short Jcc instructions here (e.g., JL, JG, JNC, etc.)
 
         // Universal MOV reg, imm (0xB0 - 0xBF)
         if (opcode >= 0xB0 && opcode <= 0xBF) {
@@ -993,163 +993,369 @@ export class CPU {
             return true;
         }
 
-               // PUSH reg (0x50 + reg_index)
-            if (opcode >= 0x50 && opcode <= 0x57) {
-                const regIdx = opcode - 0x50;
-                const sizeBytes = 8;
-                const regName = this.getRegisterString(regIdx, sizeBytes, rexPrefix !== 0);
-                const value = this.readRegister(regName, sizeBytes);
-                console.log(`PUSH ${regName.toUpperCase()} - RSP Before: 0x${this.rsp.toString(16)}`);
+        // MOV r/m{16,32,64}, imm{16,32,64} (0xC7 /0)
+        if (opcode === 0xC7) {
+            const modrm = this.readModRMByte();
+            
+            // For 0xC7, the reg field in ModR/M should be 0
+            if (modrm.reg !== 0) {
+                throw new Error(`Invalid ModR/M reg field for MOV r/m, imm: ${modrm.reg}`);
+            }
+            
+            // Determine operand size based on prefix and mode
+            let sizeBytes, targetSizeBytes;
+            if (rexPrefix !== 0 && (rexPrefix & 0x08)) {  // REX.W prefix
+                sizeBytes = 4;  // 32-bit immediate sign-extended to 64-bit
+                targetSizeBytes = 8;  // Target is 64-bit
+            } else if (this.operandSizeOverride) {
+                sizeBytes = 2; // 16-bit with 66h prefix
+                targetSizeBytes = 2;
+            } else {
+                sizeBytes = 4; // 32-bit
+                targetSizeBytes = 4;
+            }
+            
+            // Read immediate value
+            let immValue = this.readSignedImmediate(sizeBytes);
+            
+            // Sign extend to 64 bits if needed
+            if (sizeBytes === 4 && targetSizeBytes === 8) {
+                immValue = BigInt.asIntN(32, immValue);
+            }
+            
+            // Resolve the destination operand with target size
+            const rmOperand = this.resolveModRMOperand(modrm, targetSizeBytes, rex_r, rex_b, rexPrefix !== 0);
+            
+            // Write the immediate to the destination
+            if (rmOperand.type === 'reg') {
+                this.writeRegister(rmOperand.name, immValue, targetSizeBytes);
+            } else {
+                // For memory destination, use the actual size of the immediate
+                if (sizeBytes === 1) {
+                    this.writeVirtualUint8(rmOperand.address, Number(immValue));
+                } else if (sizeBytes === 2) {
+                    this.writeVirtualUint16(rmOperand.address, Number(immValue));
+                } else if (sizeBytes === 4) {
+                    this.writeVirtualUint32(rmOperand.address, Number(immValue));
+                } else {
+                    throw new Error(`Unsupported size for MOV r/m, imm: ${sizeBytes} bytes`);
+                }
+            }
+            
+            console.log(`Decoded: MOV ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`}, 0x${immValue.toString(16)}`);
+            return true;
+        }
+
+        // PUSH reg (0x50 + reg_index)
+        if (opcode >= 0x50 && opcode <= 0x57) {
+            const regIdx = opcode - 0x50;
+            const sizeBytes = 8;
+            const regName = this.getRegisterString(regIdx, sizeBytes, rexPrefix !== 0);
+            const value = this.readRegister(regName, sizeBytes);
+            console.log(`PUSH ${regName.toUpperCase()} - RSP Before: 0x${this.rsp.toString(16)}`);
+            this.rsp -= BigInt(sizeBytes);
+            this.writeVirtualBigUint64(this.rsp, value);
+            console.log(`Decoded: PUSH ${regName.toUpperCase()} (0x${value.toString(16)}n)`);
+            console.log(`PUSH ${regName.toUpperCase()} - RSP After: 0x${this.rsp.toString(16)}`);
+            return true;
+        }
+
+        // PUSH r/m (0xFF /6)
+        if (opcode === 0xFF) {
+            const modrm = this.readModRMByte();
+            if (modrm.reg === 6) { // PUSH r/m
+                let sizeBytes = defaultOperandSize;
+                const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
+                
+                let value;
+                if (rmOperand.type === 'reg') {
+                    value = this.readRegister(rmOperand.name, sizeBytes);
+                } else {
+                    if (sizeBytes === 1) value = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) value = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) value = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) value = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for PUSH r/m.");
+                }
+                console.log(`PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP Before: 0x${this.rsp.toString(16)}`);
                 this.rsp -= BigInt(sizeBytes);
                 this.writeVirtualBigUint64(this.rsp, value);
-                console.log(`Decoded: PUSH ${regName.toUpperCase()} (0x${value.toString(16)}n)`);
-                console.log(`PUSH ${regName.toUpperCase()} - RSP After: 0x${this.rsp.toString(16)}`);
-                return true;
-            }
-    
-            // PUSH r/m (0xFF /6)
-            if (opcode === 0xFF) {
-                const modrm = this.readModRMByte();
-                if (modrm.reg === 6) { // PUSH r/m
-                    let sizeBytes = defaultOperandSize;
-                    const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
-                    
-                    let value;
-                    if (rmOperand.type === 'reg') {
-                        value = this.readRegister(rmOperand.name, sizeBytes);
-                    } else {
-                        if (sizeBytes === 1) value = BigInt(this.readVirtualUint8(rmOperand.address));
-                        else if (sizeBytes === 2) value = BigInt(this.readVirtualUint16(rmOperand.address));
-                        else if (sizeBytes === 4) value = BigInt(this.readVirtualUint32(rmOperand.address));
-                        else if (sizeBytes === 8) value = this.readVirtualBigUint64(rmOperand.address);
-                        else throw new Error("Unsupported memory read size for PUSH r/m.");
-                    }
-                    console.log(`PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP Before: 0x${this.rsp.toString(16)}`);
-                    this.rsp -= BigInt(sizeBytes);
-                    this.writeVirtualBigUint64(this.rsp, value);
-                    
-                    console.log(`Decoded: PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (0x${value.toString(16)}n)`);
-                    console.log(`PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP After: 0x${this.rsp.toString(16)}`);
-                    return true;
-                }
-            }
-    
-            // POP reg (0x58 + reg_index)
-            if (opcode >= 0x58 && opcode <= 0x5F) {
-                const regIdx = opcode - 0x58;
-                const sizeBytes = 8;
-                const regName = this.getRegisterString(regIdx, sizeBytes, rexPrefix !== 0);
-                console.log(`POP ${regName.toUpperCase()} - RSP Before: 0x${this.rsp.toString(16)}`);
-                const value = this.readVirtualBigUint64(this.rsp);
-                this.writeRegister(regName, value, sizeBytes);
-                this.rsp += BigInt(sizeBytes);
                 
-                console.log(`Decoded: POP ${regName.toUpperCase()} (0x${value.toString(16)}n)`);
-                console.log(`POP ${regName.toUpperCase()} - RSP After: 0x${this.rsp.toString(16)}`);
+                console.log(`Decoded: PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (0x${value.toString(16)}n)`);
+                console.log(`PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP After: 0x${this.rsp.toString(16)}`);
                 return true;
             }
-    
-            // POP r/m (0x8F /0)
-            if (opcode === 0x8F) {
-                const modrm = this.readModRMByte();
-                if (modrm.reg === 0) { // POP r/m
-                    let sizeBytes = defaultOperandSize;
-                    const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
-                    
-                    console.log(`POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP Before: 0x${this.rsp.toString(16)}`);
-                    this.rsp += BigInt(sizeBytes);
-                    this.writeRegister(rmOperand.name, value, sizeBytes);
-    
-                    let value;
-                    if (rmOperand.type === 'reg') {
-                        value = this.readRegister(rmOperand.name, sizeBytes);
-                    } else {
-                        if (sizeBytes === 1) value = BigInt(this.readVirtualUint8(rmOperand.address));
-                        else if (sizeBytes === 2) value = BigInt(this.readVirtualUint16(rmOperand.address));
-                        else if (sizeBytes === 4) value = BigInt(this.readVirtualUint32(rmOperand.address));
-                        else if (sizeBytes === 8) value = this.readVirtualBigUint64(rmOperand.address);
-                        else throw new Error("Unsupported memory read size for POP r/m.");
-                    }
-    
-                    console.log(`Decoded: POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (0x${value.toString(16)}n)`);
-                    console.log(`POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP After: 0x${this.rsp.toString(16)}`);
-                    return true;
+        }
+
+        // POP reg (0x58 + reg_index)
+        if (opcode >= 0x58 && opcode <= 0x5F) {
+            const regIdx = opcode - 0x58;
+            const sizeBytes = 8;
+            const regName = this.getRegisterString(regIdx, sizeBytes, rexPrefix !== 0);
+            console.log(`POP ${regName.toUpperCase()} - RSP Before: 0x${this.rsp.toString(16)}`);
+            const value = this.readVirtualBigUint64(this.rsp);
+            this.writeRegister(regName, value, sizeBytes);
+            this.rsp += BigInt(sizeBytes);
+            
+            console.log(`Decoded: POP ${regName.toUpperCase()} (0x${value.toString(16)}n)`);
+            console.log(`POP ${regName.toUpperCase()} - RSP After: 0x${this.rsp.toString(16)}`);
+            return true;
+        }
+
+        // POP r/m (0x8F /0)
+        if (opcode === 0x8F) {
+            const modrm = this.readModRMByte();
+            if (modrm.reg === 0) { // POP r/m
+                let sizeBytes = defaultOperandSize;
+                const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
+                
+                console.log(`POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP Before: 0x${this.rsp.toString(16)}`);
+                this.rsp += BigInt(sizeBytes);
+                this.writeRegister(rmOperand.name, value, sizeBytes);
+
+                let value;
+                if (rmOperand.type === 'reg') {
+                    value = this.readRegister(rmOperand.name, sizeBytes);
+                } else {
+                    if (sizeBytes === 1) value = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) value = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) value = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) value = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for POP r/m.");
                 }
+
+                console.log(`Decoded: POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (0x${value.toString(16)}n)`);
+                console.log(`POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP After: 0x${this.rsp.toString(16)}`);
+                return true;
             }
-    
-            // CALL rel32 (0xE8) - Near, relative, 32-bit displacement
-            if (opcode === 0xE8) {
-                const displacement = this.readSignedImmediate(4);
+        }
+
+        // CALL rel32 (0xE8) - Near, relative, 32-bit displacement
+        if (opcode === 0xE8) {
+            const displacement = this.readSignedImmediate(4);
+            const retAddr = this.rip;
+            console.log(`CALL rel32 - RSP Before: 0x${this.rsp.toString(16)}`);
+            this.rsp -= 8n;
+            this.writeVirtualBigUint64(this.rsp, retAddr);
+            this.rip += BigInt(displacement);
+
+            console.log(`Decoded: CALL rel32 0x${displacement.toString(16)} (RIP adjusted to 0x${this.rip.toString(16)})`);
+            console.log(`CALL rel32 - RSP After: 0x${this.rsp.toString(16)}`);
+            return true;
+        }
+
+        // CALL r/m (0xFF /2) - Near, absolute, indirect
+        if (opcode === 0xFF) {
+            const modrm = this.readModRMByte();
+            if (modrm.reg === 2) { // opcode extension /2
+                let sizeBytes = defaultOperandSize;
+                const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
+                
+                let tgtAddr;
+                if (rmOperand.type === 'reg') {
+                    tgtAddr = this.readRegister(rmOperand.name, sizeBytes);
+                } else {
+                    if (sizeBytes === 1) tgtAddr = BigInt(this.readVirtualUint8(rmOperand.address));
+                    else if (sizeBytes === 2) tgtAddr = BigInt(this.readVirtualUint16(rmOperand.address));
+                    else if (sizeBytes === 4) tgtAddr = BigInt(this.readVirtualUint32(rmOperand.address));
+                    else if (sizeBytes === 8) tgtAddr = this.readVirtualBigUint64(rmOperand.address);
+                    else throw new Error("Unsupported memory read size for CALL r/m.");
+                }
+                
                 const retAddr = this.rip;
-                console.log(`CALL rel32 - RSP Before: 0x${this.rsp.toString(16)}`);
+                console.log(`CALL r/m - RSP Before: 0x${this.rsp.toString(16)}`);
                 this.rsp -= 8n;
                 this.writeVirtualBigUint64(this.rsp, retAddr);
-                this.rip += BigInt(displacement);
-    
-                console.log(`Decoded: CALL rel32 0x${displacement.toString(16)} (RIP adjusted to 0x${this.rip.toString(16)})`);
-                console.log(`CALL rel32 - RSP After: 0x${this.rsp.toString(16)}`);
+                this.rip = tgtAddr;
+
+                console.log(`Decoded: CALL ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (Indirect, jumping to 0x${this.rip.toString(16)})`);
+                console.log(`CALL r/m - RSP After: 0x${this.rsp.toString(16)}`);
                 return true;
             }
-    
-            // CALL r/m (0xFF /2) - Near, absolute, indirect
-            if (opcode === 0xFF) {
-                const modrm = this.readModRMByte();
-                if (modrm.reg === 2) { // opcode extension /2
-                    let sizeBytes = defaultOperandSize;
-                    const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
-                    
-                    let tgtAddr;
-                    if (rmOperand.type === 'reg') {
-                        tgtAddr = this.readRegister(rmOperand.name, sizeBytes);
-                    } else {
-                        if (sizeBytes === 1) tgtAddr = BigInt(this.readVirtualUint8(rmOperand.address));
-                        else if (sizeBytes === 2) tgtAddr = BigInt(this.readVirtualUint16(rmOperand.address));
-                        else if (sizeBytes === 4) tgtAddr = BigInt(this.readVirtualUint32(rmOperand.address));
-                        else if (sizeBytes === 8) tgtAddr = this.readVirtualBigUint64(rmOperand.address);
-                        else throw new Error("Unsupported memory read size for CALL r/m.");
-                    }
-                    
-                    const retAddr = this.rip;
-                    console.log(`CALL r/m - RSP Before: 0x${this.rsp.toString(16)}`);
-                    this.rsp -= 8n;
-                    this.writeVirtualBigUint64(this.rsp, retAddr);
-                    this.rip = tgtAddr;
-    
-                    console.log(`Decoded: CALL ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (Indirect, jumping to 0x${this.rip.toString(16)})`);
-                    console.log(`CALL r/m - RSP After: 0x${this.rsp.toString(16)}`);
-                    return true;
-                }
+        }
+
+        // RET (0xC3) - Near return
+        if (opcode === 0xC3) {
+            console.log(`RET - RSP Before: 0x${this.rsp.toString(16)}`);
+            const retAddr = this.readVirtualBigUint64(this.rsp);
+            this.rsp += 8n;
+            this.rip = retAddr;
+
+            console.log(`Decoded: RET (Near, jumping to 0x${this.rip.toString(16)})`);
+            console.log(`RET - RSP After: 0x${this.rsp.toString(16)}`);
+            return true;
+        }
+
+        // RET imm16 (0xC2) - Near, return with immediate
+        if (opcode === 0xC2) {
+            const imm16 = this.readSignedImmediate(2);
+            console.log(`RET imm16 - RSP Before: 0x${this.rsp.toString(16)}`);
+            const retAddr = this.readVirtualBigUint64(this.rsp);
+            this.rsp += 8n;
+            this.rip = retAddr;
+            this.rsp += BigInt(imm16);
+
+            console.log(`Decoded: RET imm16 (jumping to 0x${this.rip.toString(16)}, stack adjust by 0x${imm16.toString(16)})`);
+            console.log(`RET imm16 - RSP After: 0x${this.rsp.toString(16)}`);
+            return true;
+        }
+
+        // LEA r/m, reg (0x8D)
+        if (opcode === 0x8D) {
+            const modrm = this.readModRMByte();
+            // LEA only works with memory sources, so mod must not be 3
+            if (modrm.mod === 3) {
+                throw new Error("Invalid use of LEA with register source.");
             }
-    
-            // RET (0xC3) - Near return
-            if (opcode === 0xC3) {
-                console.log(`RET - RSP Before: 0x${this.rsp.toString(16)}`);
-                const retAddr = this.readVirtualBigUint64(this.rsp);
-                this.rsp += 8n;
-                this.rip = retAddr;
-    
-                console.log(`Decoded: RET (Near, jumping to 0x${this.rip.toString(16)})`);
-                console.log(`RET - RSP After: 0x${this.rsp.toString(16)}`);
-                return true;
+
+            let sizeBytes = defaultOperandSize;
+            // Note: In 64-bit mode, operand size can be 16, 32, or 64.
+            // REX.W=1 -> 64-bit. No REX.W -> 32-bit. 0x66 prefix -> 16-bit.
+
+            const destRegFullIndex = modrm.reg + (rex_r << 3);
+            const destRegName = this.getRegisterString(destRegFullIndex, sizeBytes, rexPrefix !== 0);
+
+            // Here's the magic: we use resolveModRMOperand to get the address
+            const memOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
+            const effectiveAddress = memOperand.address;
+
+            // ...but we write the address itself to the destination register.
+            this.writeRegister(destRegName, effectiveAddress, sizeBytes);
+
+            console.log(`Decoded: LEA ${destRegName.toUpperCase()}, [address] (Calculated address: 0x${effectiveAddress.toString(16)})`);
+            return true;
+        }
+
+        // TEST r/m, reg (0x84, 0x85)
+        if (opcode === 0x84 || opcode === 0x85) {
+            const modrm = this.readModRMByte();
+            const wBit = opcode & 0x01;
+            let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
+
+            const regOpFullIndex = modrm.reg + (rex_r << 3);
+            const regOpName = this.getRegisterString(regOpFullIndex, sizeBytes, rexPrefix !== 0);
+            const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
+
+            let val1, val2;
+            val1 = this.readRegister(regOpName, sizeBytes); // Operand from reg field
+
+            if (rmOperand.type === 'reg') {
+                val2 = this.readRegister(rmOperand.name, sizeBytes);
+            } else { // Memory operand
+                if (sizeBytes === 1) val2 = BigInt(this.readVirtualUint8(rmOperand.address));
+                else if (sizeBytes === 2) val2 = BigInt(this.readVirtualUint16(rmOperand.address));
+                else if (sizeBytes === 4) val2 = BigInt(this.readVirtualUint32(rmOperand.address));
+                else val2 = this.readVirtualBigUint64(rmOperand.address);
             }
-    
-            // RET imm16 (0xC2) - Near, return with immediate
-            if (opcode === 0xC2) {
-                const imm16 = this.readSignedImmediate(2);
-                console.log(`RET imm16 - RSP Before: 0x${this.rsp.toString(16)}`);
-                const retAddr = this.readVirtualBigUint64(this.rsp);
-                this.rsp += 8n;
-                this.rip = retAddr;
-                this.rsp += BigInt(imm16);
-    
-                console.log(`Decoded: RET imm16 (jumping to 0x${this.rip.toString(16)}, stack adjust by 0x${imm16.toString(16)})`);
-                console.log(`RET imm16 - RSP After: 0x${this.rsp.toString(16)}`);
-                return true;
+
+            const result = val1 & val2;
+
+            // TEST sets flags based on the result but doesn't store it
+            this.flags.cf = 0;
+            this.flags.of = 0;
+            this.flags.zf = (result === 0n) ? 1 : 0;
+            const signBitMask = 1n << (BigInt(sizeBytes * 8) - 1n);
+            this.flags.sf = ((result & signBitMask) !== 0n) ? 1 : 0;
+            // Parity Flag (PF) is also affected, but you can add that later.
+
+            const rmOperandStr = rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`;
+            console.log(`Decoded: TEST ${rmOperandStr}, ${regOpName.toUpperCase()}`);
+            return true;
+        }
+
+        // Group 2 Immediate Instructions (ROL, ROR, RCL, RCR, SHL, SHR, SAR)
+        if (opcode === 0xC0 || opcode === 0xC1) {
+            const modrm = this.readModRMByte();
+            const wBit = opcode & 0x01;
+            let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
+            
+            const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
+            const shiftCount = this.readSignedImmediate(1); // imm8
+
+            // Read the value to be shifted
+            let value;
+            if (rmOperand.type === 'reg') {
+                value = this.readRegister(rmOperand.name, sizeBytes);
+            } else {
+                // Read from memory
+                if (sizeBytes === 1) value = BigInt(this.readVirtualUint8(rmOperand.address));
+                else if (sizeBytes === 2) value = BigInt(this.readVirtualUint16(rmOperand.address));
+                else if (sizeBytes === 4) value = BigInt(this.readVirtualUint32(rmOperand.address));
+                else value = this.readVirtualBigUint64(rmOperand.address);
             }
+
+            let result;
+            let mnemonic = "UNKNOWN_SHIFT";
+
+            // The 'reg' field of ModR/M acts as an opcode extension here
+            switch (modrm.reg) {
+                case 4: // SHL
+                    mnemonic = "SHL";
+                    result = value << shiftCount;
+                    // TODO: Set CF and OF correctly for SHL
+                    break;
+                case 5: // SHR
+                    mnemonic = "SHR";
+                    result = value >> shiftCount;
+                    // TODO: Set CF and OF correctly for SHR
+                    break;
+                // Add other shifts like SAR (case 7) here
+                default:
+                    throw new Error(`Unhandled Group 2 instruction with /reg=${modrm.reg}`);
+            }
+
+            // Update flags (simplified for now)
+            this.flags.zf = (result === 0n) ? 1 : 0;
+            // SF update needs to consider the size
+            const bitWidth = BigInt(sizeBytes * 8);
+            const signBitMask = 1n << (bitWidth - 1n);
+            this.flags.sf = ((result & signBitMask) !== 0n) ? 1 : 0;
+
+            // Write the result back
+            if (rmOperand.type === 'reg') {
+                this.writeRegister(rmOperand.name, result, sizeBytes);
+            } else {
+                // Write to memory
+                if (sizeBytes === 1) this.writeVirtualUint8(rmOperand.address, Number(result));
+                else if (sizeBytes === 2) this.writeVirtualUint16(rmOperand.address, Number(result));
+                else if (sizeBytes === 4) this.writeVirtualUint32(rmOperand.address, Number(result));
+                else this.writeVirtualBigUint64(rmOperand.address, result);
+            }
+
+            const rmOperandStr = rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`;
+            console.log(`Decoded: ${mnemonic} ${rmOperandStr}, ${shiftCount}`);
+            return true;
+        }
+
+        // JL rel8 (0x7C)
+        if (opcode === 0x7C) {
+            const displacement = this.readSignedImmediate(1);
+            console.log(`Decoded: JL rel8 0x${displacement.toString(16)}`);
+            if (this.flags.sf !== this.flags.of) { // Condition for JL
+                this.rip += displacement;
+                console.log(`  Condition Met (SF!=OF). Jumping to 0x${this.rip.toString(16)}`);
+            } else {
+                console.log(`  Condition Not Met. Not jumping.`);
+            }
+            return true;
+        }
+
+        // JB rel8 (0x72)
+        if (opcode === 0x72) {
+            const displacement = this.readSignedImmediate(1);
+            console.log(`Decoded: JB rel8 0x${displacement.toString(16)}`);
+            if (this.flags.cf !== 0) { // Condition for JB
+                this.rip += displacement;
+                console.log(`  Condition Met (CF!=0). Jumping to 0x${this.rip.toString(16)}`);
+            } else {
+                console.log(`  Condition Not Met. Not jumping.`);
+            }
+            return true;
+        }
 
         // If an instruction falls through all specific handlers, it's truly unknown
         console.log(`Unknown opcode: 0x${(twoByteOpcode ? '0F ' : '')}${opcode.toString(16)} at 0x${currentRIPBeforeFetch.toString(16)}`); // Use currentRIPBeforeFetch for unknown opcodes
-        return true;
+        return false;
     }
 
     readInstructionByte() {
@@ -1257,62 +1463,81 @@ export class CPU {
         return BigInt(value); 
     }
 
-    resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, hasRexPrefixForNaming) { // Added hasRexPrefixForNaming
+    readSIBByte(mod) {
+        const sib = this.readInstructionByte();
+        const scaleBits = (sib >>> 6) & 0x03;
+        const indexBits = (sib >>> 3) & 0x07;
+        const baseBits = sib & 0x07;
+
+        // Scale is either 1, 2, 4, or 8
+        const scale = 1 << scaleBits;
+
+        const idxRegName = this.getRegisterString(indexBits, 8, false);
+        const baseRegName = this.getRegisterString(baseBits, 8, false);
+
+        let baseValue = 0n;
+
+        // Special case: if base is RBP/EBP and mod is 00, there is no base register
+        if (!(baseBits === 5 && mod === 0)) {
+            baseValue = this.readRegister(baseRegName, 8);
+        }
+
+        let indexValue = 0n;
+       // Special case: if index is RSP, there is no index register
+        if (indexBits !== 4) {
+            indexValue = this.readRegister(idxRegName, 8);
+        }
+
+        const addr = baseValue + (indexValue * BigInt(scale));
+        console.log(`  SIB Decoded: Base=${baseRegName}, Index=${idxRegName}, Scale=${scale} => Address component = 0x${addr.toString(16)}`);
+        return addr;
+    }
+
+    resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, hasRexPrefixForNaming) {
         let baseRegName;
         let effectiveAddress = 0n;
         let displacement = 0n;
 
+        // REX.B extends the r/m field
         const rmIndex = modrm.rm + (rex_b << 3);
 
         if (modrm.mod === 0x03) {
-            // Pass hasRexPrefixForNaming to getRegisterString as this is a register operand
+            // Register operand, no changes needed here.
             return { type: 'reg', name: this.getRegisterString(rmIndex, sizeBytes, hasRexPrefixForNaming) };
         }
 
-        switch (modrm.mod) {
-            case 0x00: // [reg] or [reg + disp32] or [disp32]
-                if (modrm.rm === 0x04) { // R/M = 100b indicates SIB byte (skip for now)
-                    console.warn("SIB byte detected (Mod=00, R/M=04). SIB not implemented yet. Consuming SIB byte.");
-                    this.readInstructionByte(); 
-                    throw new Error("SIB byte not implemented for Mod=00, R/M=04"); 
-                } else if (modrm.rm === 0x05) { // R/M = 101b indicates absolute 32-bit displacement (RIP-relative in 64-bit, but simpler absolute for now)
-                    displacement = this.readSignedImmediate(4); 
-                    effectiveAddress = displacement; 
-                    console.log(`  Absolute 32-bit address: 0x${effectiveAddress.toString(16)}`);
-                } else { // [base_reg] (Mod=00, no displacement)
-                    // Base registers (RSP, RBP, etc.) are always 64-bit, so hasRexPrefixForNaming isn't strictly needed for their *names*
-                    // but it's passed here for consistency with the `getRegisterString` signature.
-                    baseRegName = this.getRegisterString(rmIndex, 8, false); // For base registers, use 64-bit name, hasRexPrefix isn't relevant for name lookup
-                    effectiveAddress = this.readRegister(baseRegName, 8);
-                    console.log(`  Base Reg: ${baseRegName.toUpperCase()} = 0x${effectiveAddress.toString(16)}`);
-                }
-                break;
-            case 0x01: // [reg + disp8]
-                if (modrm.rm === 0x04) { // R/M = 100b indicates SIB byte
-                    console.warn("SIB byte detected (Mod=01, R/M=04). SIB not implemented yet. Consuming SIB byte.");
-                    this.readInstructionByte(); 
-                    throw new Error("SIB byte not implemented for Mod=01, R/M=04"); 
-                }
-                baseRegName = this.getRegisterString(rmIndex, 8, false); // For base registers, use 64-bit name
-                effectiveAddress = this.readRegister(baseRegName, 8);
-                displacement = this.readSignedImmediate(1); 
-                effectiveAddress = effectiveAddress + displacement;
-                console.log(`  Base Reg: ${baseRegName.toUpperCase()} + Disp8: 0x${displacement.toString(16)} = 0x${effectiveAddress.toString(16)}`);
-                break;
-            case 0x02: // [reg + disp32]
-                if (modrm.rm === 0x04) { // R/M = 100b indicates SIB byte
-                    console.warn("SIB byte detected (Mod=02, R/M=04). SIB not implemented yet. Consuming SIB byte.");
-                    this.readInstructionByte(); 
-                    throw new Error("SIB byte not implemented for Mod=02, R/M=04"); 
-                }
-                baseRegName = this.getRegisterString(rmIndex, 8, false); // For base registers, use 64-bit name
-                effectiveAddress = this.readRegister(baseRegName, 8);
-                displacement = this.readSignedImmediate(4); 
-                effectiveAddress = effectiveAddress + displacement;
-                console.log(`  Base Reg: ${baseRegName.toUpperCase()} + Disp32: 0x${displacement.toString(16)} = 0x${effectiveAddress.toString(16)}`);
-                break;
+        // Check for SIB byte: ModR/M.rm is 4 (RSP/ESP) AND Mod is not 3
+        if (modrm.rm === 0x04) {
+            // This is where we handle the SIB byte
+            // The address calculation starts with what the SIB byte provides
+            effectiveAddress = this.readSIBByte(modrm.mod);
+        } else if (modrm.mod === 0x00 && modrm.rm === 0x05) {
+            // RIP-relative addressing (Mod=00, R/M=05)
+            // The displacement is relative to the *next* instruction's address
+            displacement = this.readSignedImmediate(4);
+            effectiveAddress = this.rip + displacement;
+            console.log(`  RIP-relative address: 0x${this.rip.toString(16)} + 0x${displacement.toString(16)} = 0x${effectiveAddress.toString(16)}`);
+        } else {
+            // Standard [reg] or [reg + disp] addressing
+            baseRegName = this.getRegisterString(rmIndex, 8, false);
+            effectiveAddress = this.readRegister(baseRegName, 8);
+            console.log(`  Base Reg: ${baseRegName.toUpperCase()} = 0x${effectiveAddress.toString(16)}`);
         }
 
+        // Add displacement based on Mod field
+        if (modrm.mod === 0x01) { // [reg + disp8] or [SIB + disp8]
+            displacement = this.readSignedImmediate(1);
+            effectiveAddress += displacement;
+            console.log(`  + Disp8: 0x${displacement.toString(16)} = 0x${effectiveAddress.toString(16)}`);
+        } else if (modrm.mod === 0x02) { // [reg + disp32] or [SIB + disp32]
+            displacement = this.readSignedImmediate(4);
+            effectiveAddress += displacement;
+            console.log(`  + Disp32: 0x${displacement.toString(16)} = 0x${effectiveAddress.toString(16)}`);
+        }
+
+        // The existing special case for Mod=00, R/M=05 is now RIP-relative, handled above.
+        // The other cases are covered by the main logic.
+        
         return { type: 'mem', address: effectiveAddress, sizeBytes: sizeBytes };
     }
 

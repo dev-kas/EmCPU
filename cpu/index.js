@@ -44,15 +44,27 @@ async function runEmulator() {
         }
     }
 
+    // Helper function to format register values with proper sign extension
+    const formatRegister = (value, bits = 64) => {
+        // Convert to BigInt if it's not already
+        const bigVal = BigInt(value);
+        // Mask to get the correct number of bits
+        const mask = (1n << BigInt(bits)) - 1n;
+        const maskedValue = bigVal & mask;
+        // Convert to hex with proper padding
+        const hexStr = maskedValue.toString(16).padStart(bits / 4, '0');
+        return `0x${hexStr}`;
+    };
+
     console.log("\nEmulation completed");
     console.log("--- Final Register States ---");
-    console.log("Final AL:", `0x${cpu.readRegister('al', 1).toString(16).padStart(2, '0')}`);
-    console.log("Final RAX:", `0x${cpu.rax.toString(16).padStart(16, '0')}`);
-    console.log("Final RBX:", `0x${cpu.rbx.toString(16).padStart(16, '0')}`); 
-    console.log("Final RCX:", `0x${cpu.rcx.toString(16).padStart(16, '0')}`);
-    console.log("Final RDX:", `0x${cpu.rdx.toString(16).padStart(16, '0')}`);
-    console.log("Final R8:", `0x${cpu.r8.toString(16).padStart(16, '0')}`);
-    console.log("Final RDI:", `0x${cpu.rdi.toString(16).padStart(16, '0')}`);
+    console.log("Final AL:", formatRegister(cpu.readRegister('al', 1), 8));
+    console.log("Final RAX:", formatRegister(cpu.rax));
+    console.log("Final RBX:", formatRegister(cpu.rbx));
+    console.log("Final RCX:", formatRegister(cpu.rcx));
+    console.log("Final RDX:", formatRegister(cpu.rdx));
+    console.log("Final R8:", formatRegister(cpu.r8));
+    console.log("Final RDI:", formatRegister(cpu.rdi));
 
     console.log("\n--- Final Control Registers ---");
     console.log("Final CR0:", `0x${cpu.cr0.toString(16).padStart(16, '0')}`);
