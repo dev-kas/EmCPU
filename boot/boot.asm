@@ -21,35 +21,25 @@ _start:
     hlt
 
 _main:
-    ; --- SHL Test ---
-    ; Start with the number 13 (0b1101)
-    mov rax, 13
+    ; --- CMP with a LARGE Immediate Test ---
+    ; This number is too large to be encoded in a single byte,
+    ; so the assembler MUST use the 0x3D opcode.
     
-    ; Shift left by 3 bits.
-    ; 13 * (2^3) = 13 * 8 = 104
-    ; Binary: 0b1101 -> 0b1101000
-    ; Hex: 0x68
-    shl rax, 3
+    mov rax, 0x12345678
+    cmp rax, 0x12345678  ; This will generate opcode 0x3D
     
-    ; --- Verification ---
-    ; Check if RAX now holds the correct value, 104.
-    cmp rax, 104
+    ; If the comparison works, ZF will be 1 and JE will be taken.
     je .success
-
+    
 .failure:
-    mov rcx, 0xDEADBEEF  ; Indicate failure
+    mov rcx, 0xDEADBEEF
     jmp .end
 
 .success:
-    mov rcx, 0xCAFEBABE  ; Indicate pass
+    mov rcx, 0xCAFEBABE
     
 .end:
     ret
 
 times 510-($-$$) db 0
 dw 0xAA55
-
-; How to Confirm It Works:
-;     Your `SHL` implementation must correctly read the immediate value (`3`) and
-;     perform the bitwise shift on the value in `RAX`. The result should be written back to `RAX`.
-;     The final comparison will pass if the math is correct, setting `RCX` to `0xCAFEBABE`.

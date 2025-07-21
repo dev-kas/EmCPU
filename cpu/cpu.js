@@ -945,6 +945,109 @@ export class CPU {
             }
         }
 
+        // In cpu.js -> inside the step() method's instruction decoder
+
+        // Group 1 Instructions (ADD, OR, ADC, SBB, AND, SUB, XOR, CMP) with immediate
+        // 0x81: r/m, imm32
+        // 0x83: r/m, imm8 (sign-extended)
+        if (opcode === 0x81 || opcode === 0x83) {
+            const modrm = this.readModRMByte();
+            let sizeBytes = defaultOperandSize;
+
+            const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rexPrefix !== 0);
+
+            // Opcode 0x83 uses a sign-extended 8-bit immediate.
+            // Opcode 0x81 uses a 16/32-bit immediate.
+            const immediateSizeBytes = (opcode === 0x83) ? 1 : (sizeBytes === 2 ? 2 : 4);
+            const immediateValue = this.readSignedImmediate(immediateSizeBytes);
+
+            // Read the destination value
+            let destValue;
+            if (rmOperand.type === 'reg') {
+                destValue = this.readRegister(rmOperand.name, sizeBytes);
+            } else { // Memory
+                if (sizeBytes === 1) destValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                else if (sizeBytes === 2) destValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                else if (sizeBytes === 4) destValue = BigInt(this.readVirtualUint32(rmOperand.address));
+                else destValue = this.readVirtualBigUint64(rmOperand.address);
+            }
+
+            let result;
+            let operation = 'unknown';
+
+            // The 'reg' field selects the operation
+            switch (modrm.reg) {
+                case 0: // ADD
+                    operation = 'add';
+                    result = destValue + immediateValue;
+                    break;
+                case 4: // AND
+                    operation = 'and';
+                    result = destValue & immediateValue;
+                    break;
+                case 5: // SUB
+                    operation = 'sub';
+                    result = destValue - immediateValue;
+                    break;
+                case 7: // CMP
+                    operation = 'sub'; // CMP performs a subtraction for flags
+                    result = destValue - immediateValue;
+                    break;
+                // TODO: add OR(/1), ADC(/2), SBB(/3), XOR(/6) here later
+                default:
+                    throw new Error(`Unsupported Group 1 operation with /reg=${modrm.reg}`);
+            }
+
+            // Update flags based on the operation
+            if (operation === 'add' || operation === 'sub') {
+                this.updateArithmeticFlags(result, destValue, immediateValue, sizeBytes, operation);
+            } else { // Logical op (AND)
+                this.flags.cf = 0;
+                this.flags.of = 0;
+                this.flags.zf = (result === 0n) ? 1 : 0;
+                const signBitMask = 1n << (BigInt(sizeBytes * 8) - 1n);
+                this.flags.sf = ((result & signBitMask) !== 0n) ? 1 : 0;
+            }
+
+            // For all operations except CMP, write the result back
+            if (modrm.reg !== 7) { // if not CMP
+                if (rmOperand.type === 'reg') {
+                    this.writeRegister(rmOperand.name, result, sizeBytes);
+                } else { // Memory
+                    if (sizeBytes === 1) this.writeVirtualUint8(rmOperand.address, Number(result));
+                    else if (sizeBytes === 2) this.writeVirtualUint16(rmOperand.address, Number(result));
+                    else if (sizeBytes === 4) this.writeVirtualUint32(rmOperand.address, Number(result));
+                    else this.writeVirtualBigUint64(rmOperand.address, result);
+                }
+            }
+            
+            const mnemonic = ['ADD', 'OR', 'ADC', 'SBB', 'AND', 'SUB', 'XOR', 'CMP'][modrm.reg];
+            const rmStr = rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`;
+            console.log(`Decoded: ${mnemonic} ${rmStr}, 0x${immediateValue.toString(16)}`);
+            return true;
+        }
+
+        // CMP AL/AX/EAX/RAX, imm (0x3C / 0x3D)
+        if (opcode === 0x3C || opcode === 0x3D) {
+            const wBit = opcode & 0x01;
+            let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
+
+            const regName = this.getRegisterString(0, sizeBytes, rexPrefix !== 0); // Always AL/AX/EAX/RAX
+            const regValue = this.readRegister(regName, sizeBytes);
+            
+            // Note: Even for CMP RAX, the immediate is only 32 bits and is sign-extended.
+            const immediateSize = (sizeBytes === 1) ? 1 : 4;
+            const immediateValue = this.readSignedImmediate(immediateSize);
+
+            const result = regValue - immediateValue;
+            this.updateArithmeticFlags(result, regValue, immediateValue, sizeBytes, 'sub');
+            
+            // CMP does not store the result, it only sets flags.
+
+            console.log(`Decoded: CMP ${regName.toUpperCase()}, 0x${immediateValue.toString(16)}`);
+            return true;
+        }
+
         // MOV r/m, reg; MOV reg, r/m (0x88, 0x89, 0x8A, 0x8B)
         if (opcode >= 0x88 && opcode <= 0x8B) {
             const modrm = this.readModRMByte();
