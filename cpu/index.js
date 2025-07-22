@@ -1,5 +1,6 @@
 import { CPU } from "./cpu.js";
 import { Memory } from "./memory.js";
+import { Debugger } from "./debugger.js";
 
 import fs from 'fs'; // Required for fs.readFileSync
 
@@ -8,6 +9,8 @@ async function runEmulator() {
     const memory = new Memory(memSize);
     const cpu = new CPU(memory);
     
+    const debuggerInstance = new Debugger(cpu, memory);
+
     // --- Initial Setup for Testing Memory Access ---
     cpu.rax = 0x00020000n; // Set RAX to 128KB, will be overwritten by Nasm bootsector
     cpu.r8 = 0x00010000n;  // Set R8 to 64KB, will be overwritten by Nasm bootsector
@@ -36,6 +39,11 @@ async function runEmulator() {
 
     let running = true;
     while (running) {
+        // Disable debugger for now
+        // if (debuggerInstance.breakpoints.has(cpu.rip) || debuggerInstance.stepMode) {
+        //     await debuggerInstance.runShell();
+        // }
+    
         running = cpu.step();
         if (!running) break;
         if (cpu.rip >= BigInt(memSize)) {
