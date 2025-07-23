@@ -1,4 +1,5 @@
 import { Memory } from "./memory.js";
+import { IOManager } from "./io.js";
 
 export class PageFaultException extends Error {
     constructor(message, errorCode) {
@@ -132,8 +133,9 @@ export class CPU {
         return pml4TablePhys; // Return the base address of the PML4 table for CR3
     }
 
-    constructor(memory = new Memory(1024 * 1024 * 1)) {
+    constructor(memory = new Memory(1024 * 1024 * 1), io = new IOManager()) {
         this.memory = memory;
+        this.io = io;
 
         // Interrupt Descriptor Table Register
         this.idtr = {
@@ -1460,6 +1462,54 @@ export class CPU {
                 return true;
             }
 
+            // TEST AL, imm8 (0xA8)
+            if (opcode === 0xA8) {
+                const imm8 = this.readSignedImmediate(1);
+                const alValue = this.readRegister('al', 1);
+                const result = alValue & imm8;
+
+                // TEST instruction updates flags but does not store the result.
+                // It performs a bitwise AND and sets flags based on the outcome.
+                this.flags.cf = 0; // Cleared by TEST
+                this.flags.of = 0; // Cleared by TEST
+
+                this.flags.zf = (result === 0n) ? 1 : 0;
+                this.flags.sf = ((result & 0x80n) !== 0n) ? 1 : 0;
+                // Note: Parity Flag (PF) is also affected but not implemented here.
+
+                console.log(`Decoded: TEST AL, 0x${imm8.toString(16)} (Result for flags: 0x${result.toString(16)})`);
+                return true;
+            }
+
+            // TEST AX/EAX/RAX, imm16/imm32 (0xA9)
+            if (opcode === 0xA9) {
+                let sizeBytes = defaultOperandSize;
+
+                // Determine the size of the immediate value. 
+                // For 64-bit operations, the immediate is a 32-bit value.
+                const immediateSizeBytes = (sizeBytes === 8) ? 4 : sizeBytes;
+                const immediateValue = this.readSignedImmediate(immediateSizeBytes);
+                
+                const regName = this.getRegisterString(0, sizeBytes, rexPrefix !== 0); // Accumulator (AX/EAX/RAX)
+                const regValue = this.readRegister(regName, sizeBytes);
+
+                const result = regValue & immediateValue;
+
+                // TEST updates flags and discards the result.
+                this.flags.cf = 0;
+                this.flags.of = 0;
+
+                this.flags.zf = (result === 0n) ? 1 : 0;
+                
+                // Set Sign Flag if the most significant bit of the result is 1.
+                const signBitMask = 1n << (BigInt(sizeBytes * 8) - 1n);
+                this.flags.sf = ((result & signBitMask) !== 0n) ? 1 : 0;
+                // Note: Parity Flag (PF) is also affected but not implemented here.
+
+                console.log(`Decoded: TEST ${regName.toUpperCase()}, 0x${immediateValue.toString(16)} (Result for flags: 0x${result.toString(16)})`);
+                return true;
+            }
+
             // Group 2 Immediate Instructions (ROL, ROR, RCL, RCR, SHL, SHR, SAR)
             if (opcode === 0xC0 || opcode === 0xC1) {
                 const modrm = this.readModRMByte();
@@ -1550,22 +1600,100 @@ export class CPU {
                 return true;
             }
 
-            // IRETQ (0x48 0xCF)
-            // Note: NASM often just encodes this as 0xCF, so we check for that too.
+            // JMP rel8 (0xEB)
+            if (opcode === 0xEB) {
+                // Read the 8-bit signed relative displacement
+                const displacement = this.readSignedImmediate(1);
+                
+                // Add the displacement to the current RIP to perform the jump
+                this.rip += displacement;
+                
+                console.log(`Decoded: JMP rel8 0x${displacement.toString(16)} (Jumping to 0x${this.rip.toString(16)})`);
+                return true;
+            }
+
+            // IRETQ (0xCF)
             if (opcode === 0xCF) {
-                // For now, let's assume a simple case without error code or privilege change
+                // For a return from a Page Fault (#14), an error code was pushed
+                // after RIP/CS/RFLAGS. We need to pop and discard it.
+                // A more advanced handler would handle interrupts that *don't*
+                // push an error code, but for this test, this is correct.
+                this.rsp += 8n; // Discard the error code from the stack
+
+                // Pop RIP
                 this.rip = this.readVirtualBigUint64(this.rsp);
                 this.rsp += 8n;
+
+                // Pop CS - we don't use it yet, but we must advance the stack
+                const new_cs = this.readVirtualBigUint64(this.rsp);
+                this.rsp += 8n;
                 
-                // Pop CS, for now we just discard it
+                // Pop RFLAGS and update the flags object
+                const new_rflags = this.readVirtualBigUint64(this.rsp);
+                this.disassembleRFlags(new_rflags);
                 this.rsp += 8n;
+                
+                console.log(`Decoded: IRETQ (Returning to 0x${this.rip.toString(16)}, restoring flags)`);
+                return true;
+            }
 
-                // Pop RFLAGS
-                const rflags = this.readVirtualBigUint64(this.rsp);
-                this.writeRegister('rflags', rflags, 8); // Assuming you have a rflags register
-                this.rsp += 8n;
+            // OUT DX, AL (0xEE)
+            if (opcode === 0xEE) {
+                // The port number is read from the 16-bit DX register
+                const port = this.readRegister('dx', 2);
+                const value = this.readRegister('al', 1);
+                
+                this.io.portOut(Number(port), Number(value), 1); // size is 1 byte
+                
+                console.log(`Decoded: OUT DX, AL (Wrote 0x${value.toString(16)} to port 0x${port.toString(16)})`);
+                return true;
+            }
 
-                console.log(`Decoded: IRETQ (Returning to 0x${this.rip.toString(16)})`);
+            // OUT imm8, AL (0xE6)
+            if (opcode === 0xE6) {
+                const port = this.readInstructionByte(); // Read the port number from the instruction
+                const value = this.readRegister('al', 1); // Get the value from the AL register
+                
+                this.io.portOut(port, Number(value), 1); // Send the data to the I/O bus
+
+                console.log(`Decoded: OUT imm8, AL (Wrote 0x${value.toString(16)} to port 0x${port.toString(16)})`);
+                return true;
+            }
+
+            // LODSB (0xAC)
+            if (opcode === 0xAC) {
+                // 1. Read the byte from memory at [RSI]
+                const value = this.readVirtualUint8(this.rsi);
+                
+                // 2. Put that byte into AL
+                this.writeRegister('al', value, 1);
+                
+                // 3. Increment RSI by 1
+                // (Note: A full implementation would check the Direction Flag (DF),
+                // but the default is to increment, which is all we need here).
+                this.rsi += 1n;
+    
+                console.log(`Decoded: LODSB (Loaded 0x${value.toString(16)} into AL, RSI is now 0x${this.rsi.toString(16)})`);
+                return true;
+            }
+
+            // IN AL, imm8 (0xE4)
+            if (opcode === 0xE4) {
+                const port = this.readInstructionByte(); // Read 8-bit port from instruction
+                const value = this.io.portIn(port, 1);   // Read 1 byte from the I/O bus
+                this.writeRegister('al', value, 1);      // Write the value to AL
+
+                console.log(`Decoded: IN AL, imm8 (Read 0x${value.toString(16)} from port 0x${port.toString(16)} into AL)`);
+                return true;
+            }
+
+            // IN AL, DX (0xEC)
+            if (opcode === 0xEC) {
+                const port = this.readRegister('dx', 2);   // Read 16-bit port from DX
+                const value = this.io.portIn(Number(port), 1); // Read 1 byte from the I/O bus
+                this.writeRegister('al', value, 1);        // Write the value to AL
+
+                console.log(`Decoded: IN AL, DX (Read 0x${value.toString(16)} from port 0x${port.toString(16)} into AL)`);
                 return true;
             }
 
@@ -1992,6 +2120,7 @@ export class CPU {
 
         const lowSlice = this.readVirtualBigUint64(descriptorAddr);
         const highSlice = this.readVirtualBigUint64(descriptorAddr + 8n);
+        console.log(`DEBUG: Descriptor at 0x${descriptorAddr.toString(16)} is: LOW=0x${lowSlice.toString(16)} HIGH=0x${highSlice.toString(16)}`);
 
         // === FINAL, CORRECTED PARSING LOGIC v3 ===
         // This logic correctly decodes the structure created by the assembly code.
@@ -2037,5 +2166,12 @@ export class CPU {
         // Always set bit 1 to 1, as per specification
         flags |= (1n << 1n);
         return flags;
+    }
+
+    disassembleRFlags(rflagsValue) {
+        this.flags.cf = ((rflagsValue >> CPU.FLAG_CF_BIT) & 1n) === 1n ? 1 : 0;
+        this.flags.zf = ((rflagsValue >> CPU.FLAG_ZF_BIT) & 1n) === 1n ? 1 : 0;
+        this.flags.sf = ((rflagsValue >> CPU.FLAG_SF_BIT) & 1n) === 1n ? 1 : 0;
+        this.flags.of = ((rflagsValue >> CPU.FLAG_OF_BIT) & 1n) === 1n ? 1 : 0;
     }
 }

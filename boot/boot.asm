@@ -1,84 +1,58 @@
 bits 64
 org 0x7C00
 
-CODE_SEG equ 0x08
-
-GDT_BASE    equ 0x8000
-IDT_BASE    equ GDT_BASE + 16
-
 _start:
-    ; --- STEP 1: Create the GDT ---
-    mov rdi, GDT_BASE
-    mov qword [rdi], 0
-    mov rax, 0x00209A0000000000
-    mov [rdi+8], rax
+    mov rsp, 0x200000
+    mov rsi, prompt_message
+    call print ; Print the "Enter text:" prompt
 
-    ; --- STEP 2: Create the IDT Entry ---
-    ; This is the new, foolproof method.
-    mov rdi, IDT_BASE + 14 * 16  ; Pointer to IDT entry #14
+.main_loop:
+    ; Wait for a key to be pressed
+    .wait_for_key:
+        in al, 0x64     ; Read keyboard status port
+        test al, 1      ; Is bit 0 set (output buffer full)?
+        jz .wait_for_key ; If not, loop and wait again
 
-    ; Load the handler address into a register.
-    mov rax, page_fault_handler
+    ; A key is ready, read it
+    in al, 0x60         ; Read the key scancode (or ASCII in our case)
+    
+    ; Echo the character back to the serial port
+    push rax            ; Save the character
+    mov rsi, echo_prefix
+    call print
+    pop rax             ; Restore the character
+    
+    mov rsi, temp_char  ; Point RSI to a temporary buffer
+    mov [rsi], al       ; Store the character there
+    call print          ; Print the single character
 
-    ; RDX will hold the low 8 bytes of the descriptor.
-    ; RCX will hold the high 8 bytes.
+    jmp .main_loop      ; Go back and wait for the next key
 
-    ; Construct the low qword in RDX
-    mov rdx, rax
-    mov rbx, 0x00000000FFFFFFFF
-    and rdx, rbx ; Keep only the low 32 bits of the address for now
-    mov rcx, rax
-    shr rcx, 16
-    mov rbx, 0x0000F000
-    and rcx, rbx          ; This is a trick to get bits 31:16 into place
-    or rdx, rcx
-    mov rbx, 0x8E0000000000
-    or rdx, rbx       ; Or in the Type/Attributes
-    mov rcx, CODE_SEG
-    shl rcx, 16
-    or rdx, rcx                  ; Or in the Code Segment
+; --- Reusable Print Function ---
+print:
+    push rax
+    push rdx
+    push rsi
+    mov dx, 0x3F8
+    .loop:
+        lodsb
+        cmp al, 0
+        je .done
+        out dx, al
+        jmp .loop
+    .done:
+        pop rsi
+        pop rdx
+        pop rax
+        ret
 
-    ; Construct the high qword in RCX
-    mov rcx, rax
-    shr rcx, 32
-
-    ; Write the two qwords to memory. This is atomic and simple.
-    mov [rdi], rdx
-    mov [rdi+8], rcx
-
-    ; --- STEP 3: Load Descriptors ---
-    lgdt [gdt_descriptor]
-    lidt [idt_descriptor]
-    mov rsp, 0x90000
-
-    ; --- STEP 4: Long Mode & Test ---
-    mov rax, 0xC0000080
-    mov rcx, rax
-    mov rax, 0x101
-    xor rdx, rdx
-    wrmsr
-    mov rax, 0x80000001
-    mov cr0, rax
-    mov rax, 0x20
-    mov cr4, rax
-
-    mov rbx, 0xDEADBEEF0000
-    mov rax, [rbx]
-
-    mov rcx, 0xDEADBEEF
-    hlt
-
-page_fault_handler:
-    mov rcx, 0xCAFEBABE
-    hlt
-
-gdt_descriptor:
-    dw 16 - 1
-    dq GDT_BASE
-
-idt_descriptor:
-    dw (256 * 16) - 1
-    dq IDT_BASE
+; --- Data ---
+prompt_message:
+    db "Keyboard is active. Type something!", 0x0A, 0
+echo_prefix:
+    db 0x0A, "You typed: ", 0
+temp_char:
+    db 0, 0 ; Buffer for a single character + null terminator
 
 times 510-($-$$) db 0
 dw 0xAA55

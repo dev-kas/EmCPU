@@ -1,69 +1,20 @@
 import { CPU } from "./cpu.js";
 import { Memory } from "./memory.js";
 import { Debugger } from "./debugger.js";
+import { IOManager, SerialPort, KeyboardController } from "./io.js";
+import fs from 'fs';
 
-import fs from 'fs'; // Required for fs.readFileSync
+// Helper function from your original code
+const formatRegister = (value, bits = 64) => {
+    const bigVal = BigInt(value);
+    const mask = (1n << BigInt(bits)) - 1n;
+    const maskedValue = bigVal & mask;
+    const hexStr = maskedValue.toString(16).padStart(bits / 4, '0');
+    return `0x${hexStr}`;
+};
 
-async function runEmulator() {
-    const memSize = 1024 * 1024 * 64; // 64 MB of RAM
-    const memory = new Memory(memSize);
-    const cpu = new CPU(memory);
-    
-    const debuggerInstance = new Debugger(cpu, memory);
-
-    // --- Initial Setup for Testing Memory Access ---
-    cpu.rax = 0x00020000n; // Set RAX to 128KB, will be overwritten by Nasm bootsector
-    cpu.r8 = 0x00010000n;  // Set R8 to 64KB, will be overwritten by Nasm bootsector
-    memory.writeBigUint64(0x10020, 0xAABBCCDDEEFF0011n);
-    console.log("Memory initialised at 0x10020 with: 0xAABBCCDDEEFF0011n");
-    // --- End Initial Setup ---
-
-    // --- Setup Paging Tables ---
-    const PAGE_TABLE_BASE_ADDRESS = 0x200000n; 
-    const MAPPED_VIRTUAL_START = 0n;         
-    const MAPPED_PHYSICAL_START = 0n;        
-    const MAPPED_SIZE = 0x200000n; // Map only 2MB for now      
-
-    const pml4PhysAddr = CPU.setupIdentityPaging(
-        memory, 
-        MAPPED_VIRTUAL_START, 
-        MAPPED_PHYSICAL_START, 
-        MAPPED_SIZE, 
-        PAGE_TABLE_BASE_ADDRESS
-    );
-    cpu.cr3 = pml4PhysAddr; 
-
-    const bootSectorData = new Uint8Array(fs.readFileSync('out/boot.bin'));
-    memory.load(0x7C00, bootSectorData); 
-    cpu.rip = 0x7C00n; 
-
-    let running = true;
-    while (running) {
-        // Disable debugger for now
-        // if (debuggerInstance.breakpoints.has(cpu.rip) || debuggerInstance.stepMode) {
-        //     await debuggerInstance.runShell();
-        // }
-    
-        running = cpu.step();
-        if (!running) break;
-        if (cpu.rip >= BigInt(memSize)) {
-            console.error("Segmentation fault");
-            break;
-        }
-    }
-
-    // Helper function to format register values with proper sign extension
-    const formatRegister = (value, bits = 64) => {
-        // Convert to BigInt if it's not already
-        const bigVal = BigInt(value);
-        // Mask to get the correct number of bits
-        const mask = (1n << BigInt(bits)) - 1n;
-        const maskedValue = bigVal & mask;
-        // Convert to hex with proper padding
-        const hexStr = maskedValue.toString(16).padStart(bits / 4, '0');
-        return `0x${hexStr}`;
-    };
-
+// Moved the final state dump into its own function for clarity
+function printFinalState(cpu, memory) {
     console.log("\nEmulation completed");
     console.log("--- Final Register States ---");
     console.log("Final AL:", formatRegister(cpu.readRegister('al', 1), 8));
@@ -81,11 +32,75 @@ async function runEmulator() {
     console.log("Final EFER:", `0x${cpu.efer.toString(16).padStart(16, '0')}`);
 
     console.log("\n--- Final Flags ---");
-    console.log("Final Flags (CF, ZF, SF, OF):", cpu.flags); // Updated order for common display
+    console.log("Final Flags (CF, ZF, SF, OF):", cpu.flags);
 
     console.log("\n--- Memory Verification ---");
     const actualWrittenAddress = 0x201aan; 
     console.log(`Memory at 0x${actualWrittenAddress.toString(16)}: 0x${memory.readBigUint64(Number(actualWrittenAddress)).toString(16)}`);
+
+    // We must explicitly exit because the keyboard listener keeps the process alive.
+    process.exit(0);
+}
+
+async function runEmulator() {
+    const memSize = 1024 * 1024 * 64;
+    const memory = new Memory(memSize);
+    const io = new IOManager();
+    const cpu = new CPU(memory, io);
+    const debuggerInstance = new Debugger(cpu, memory);
+
+    // --- Setup Devices ---
+    const serial = new SerialPort();
+    io.registerDevice(0x3F8, serial);
+    const keyboard = new KeyboardController();
+    io.registerDevice([0x60, 0x64], keyboard);
+
+    // --- Initial Memory/CPU State ---
+    memory.writeBigUint64(0x10020, 0xAABBCCDDEEFF0011n);
+    console.log("Memory initialised at 0x10020 with: 0xAABBCCDDEEFF0011n");
+    
+    // --- Setup Paging ---
+    const pml4PhysAddr = CPU.setupIdentityPaging(memory, 0n, 0n, 0x200000n, 0x200000n);
+    cpu.cr3 = pml4PhysAddr;
+
+    // --- Load Boot Sector ---
+    const bootSectorData = new Uint8Array(fs.readFileSync('out/boot.bin'));
+    memory.load(0x7C00, bootSectorData);
+    cpu.rip = 0x7C00n;
+
+    // --- The Asynchronous Main Loop ---
+    const run_loop = async () => {
+        try {
+            // Check for debugger break condition
+            if (debuggerInstance.breakpoints.has(cpu.rip) || debuggerInstance.stepMode) {
+                // await debuggerInstance.runShell();
+            }
+
+            // Execute one CPU instruction
+            const isRunning = cpu.step();
+
+            if (isRunning) {
+                // Check for segmentation fault
+                if (cpu.rip >= BigInt(memSize)) {
+                    console.error("Segmentation fault");
+                    printFinalState(cpu, memory); // Print state and exit
+                } else {
+                    // Schedule the next iteration, yielding to the event loop
+                    setImmediate(run_loop);
+                }
+            } else {
+                // HLT was executed, emulation is finished
+                printFinalState(cpu, memory);
+            }
+        } catch (e) {
+            console.error("A fatal error occurred during emulation:", e);
+            printFinalState(cpu, memory);
+        }
+    };
+
+    // --- Start Emulation ---
+    console.log("Starting emulation...");
+    run_loop(); // Kick off the main loop
 }
 
 runEmulator();
