@@ -2,14 +2,19 @@
   "name": "emcpu",
   "version": "1.0.0",
   "description": "Pure JavaScript CPU emulator with compatibility for the Web.",
-  "main": "cpu/index.js",
+  "main": "server/index.js",
   "scripts": {
-    "start": "node . 2>&1 | tee latest.log",
-    "run": "make run",
-    "build": "make build"
+    "start": "node .",
+    "dev": "nodemon --watch cpu/*.js --ext js --exec \"npm run build\"",
+    "build": "rollup -c"
   },
   "keywords": [],
   "author": "dev-kas",
   "license": "ISC",
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "@rollup/plugin-terser": "^0.4.4",
+    "nodemon": "^3.1.10",
+    "rollup": "^4.45.1"
+  }
 }

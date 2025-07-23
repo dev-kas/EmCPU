@@ -1,5 +1,4 @@
-import fs from 'fs';
-import readline from 'readline';
+import { log } from "./utils.js";
 
 export class IOManager {
     constructor() {
@@ -10,6 +9,7 @@ export class IOManager {
         const portArray = Array.isArray(ports) ? ports : [ports];
         for (const port of portArray) {
             this.devices.set(port, device);
+            log(`Registered device ${device.name} at port ${port}`);
         }
     }
 
@@ -29,54 +29,34 @@ export class IOManager {
     }
 }
 
-export class SerialPort {
-    // We only care about writing characters out
-    portOut(port, value, size) {
-        // The data register for the first serial port is 0x3F8
-        if (port === 0x3F8 && size === 1) {
-            // This is the magic: print the character to the host's console
-            fs.appendFileSync('out/serial.log', String.fromCharCode(value));
-        }
-    }
-}
-
-export class KeyboardController {
-    constructor() {
-        this.status = 0; // The status register
-        this.data = 0;   // The data register
-
-        // This is the magic to capture host keypresses
-        if (process.stdin.isTTY) {
-            readline.emitKeypressEvents(process.stdin);
-            process.stdin.setRawMode(true);
-            process.stdin.on('keypress', (str, key) => {
-                // When a key is pressed, store its scancode and update the status
-                // A very simplified scancode mapping (e.g., 'a' -> 0x1E)
-                // For now, let's just use the ASCII value for simplicity
-                if (str) {
-                    this.data = str.charCodeAt(0);
-                    this.status = 1; // Set bit 0: "output buffer full"
-                }
-
-                // Handle Ctrl+C to exit the emulator
-                if (key && key.ctrl && key.name === 'c') {
-                    process.exit();
-                }
-            });
-            console.log("Keyboard initialized. Press Ctrl+C to exit.");
-        }
+export class Device {
+    /**
+     * @param {string} name A descriptive name for the device for logging/debugging.
+     */
+    constructor(name = 'Unnamed Device') {
+        this.name = name;
     }
 
+    /**
+     * Handles a read from an I/O port associated with this device.
+     * @param {number} port The port number being read from.
+     * @param {number} size The size of the read in bytes (1, 2, or 4).
+     * @returns {number} The value to be returned to the CPU.
+     */
     portIn(port, size) {
-        if (port === 0x64) { // Reading the Status Port
-            return this.status;
-        }
-        if (port === 0x60) { // Reading the Data Port
-            const data = this.data;
-            this.status = 0; // Once read, the buffer is now empty
-            this.data = 0;
-            return data;
-        }
+        // Default behavior for a write-only or unimplemented device.
+        // Real hardware often returns 0xFF on reads from empty ports, but 0 is also fine.
         return 0;
+    }
+
+    /**
+     * Handles a write to an I/O port associated with this device.
+     * @param {number} port The port number being written to.
+     * @param {number} value The value being written by the CPU.
+     * @param {number} size The size of the write in bytes (1, 2, or 4).
+     */
+    portOut(port, value, size) {
+        // Default behavior for a read-only or unimplemented device is to do nothing.
+        // This is exactly like real hardware.
     }
 }

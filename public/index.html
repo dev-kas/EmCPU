@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EmCPU - Emulate a CPU</title>
+</head>
+<body>
+    <noscript>
+        <h1>EmCPU - Emulate a CPU</h1>
+        <p>This page requires JavaScript to be enabled.</p>
+    </noscript>
+    <script>
+        window.main = document.createElement("div");
+        document.body.appendChild(window.main);
+        window.main.id = "main";
+
+        window.config = {
+            MEM_SIZE: 1024 * 1024 * 64, // 64 MB
+        };
+    </script>
+    <script src="emcpu.umd.js"></script>
+    <script src="index.js" type="module"></script>
+</body>
+</html>

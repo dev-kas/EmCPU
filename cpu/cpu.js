@@ -1,3 +1,4 @@
+import * as utils from "./utils";
 import { Memory } from "./memory.js";
 import { IOManager } from "./io.js";
 
@@ -71,11 +72,11 @@ export class CPU {
         const ptTablePhys = currentTableAddr;
         currentTableAddr += PAGE_SIZE;
 
-        console.log(`Setting up identity map from VA 0x${virtualStart.toString(16)} to PA 0x${physicalStart.toString(16)}, size 0x${sizeBytes.toString(16)}`);
-        console.log(`  PML4 Table at PA 0x${pml4TablePhys.toString(16)}`);
-        console.log(`  PDPT Table at PA 0x${pdptTablePhys.toString(16)}`);
-        console.log(`  PD Table at PA 0x${pdTablePhys.toString(16)}`);
-        console.log(`  PT Table at PA 0x${ptTablePhys.toString(16)}`);
+        utils.log(`Setting up identity map from VA 0x${virtualStart.toString(16)} to PA 0x${physicalStart.toString(16)}, size 0x${sizeBytes.toString(16)}`);
+        utils.log(`  PML4 Table at PA 0x${pml4TablePhys.toString(16)}`);
+        utils.log(`  PDPT Table at PA 0x${pdptTablePhys.toString(16)}`);
+        utils.log(`  PD Table at PA 0x${pdTablePhys.toString(16)}`);
+        utils.log(`  PT Table at PA 0x${ptTablePhys.toString(16)}`);
 
 
         // Initialize all tables to 0
@@ -94,7 +95,7 @@ export class CPU {
                 console.error(`ERROR: ${description} write mismatch at 0x${addr.toString(16)}! Written: 0x${value.toString(16)}, Readback: 0x${readBack.toString(16)}`);
                 throw new Error("Page table write verification failed.");
             } else {
-                console.log(`  VERIFIED: ${description} at 0x${addr.toString(16)} is 0x${readBack.toString(16)}`);
+                utils.log(`  VERIFIED: ${description} at 0x${addr.toString(16)} is 0x${readBack.toString(16)}`);
             }
         };
 
@@ -388,7 +389,7 @@ export class CPU {
             }
 
             // --- Logging the Instruction ---
-            console.log(`RIP: 0x${currentRIPBeforeFetch.toString(16).padStart(4, '0')}, OPCODE: 0x${(twoByteOpcode ? '0F' : '')}${opcode.toString(16).padStart(2, '0')}${rexPrefix ? ` (REX: 0x${rexPrefix.toString(16)})` : ''}${this.operandSizeOverride ? ' (0x66)' : ''}`);
+            utils.log(`RIP: 0x${currentRIPBeforeFetch.toString(16).padStart(4, '0')}, OPCODE: 0x${(twoByteOpcode ? '0F' : '')}${opcode.toString(16).padStart(2, '0')}${rexPrefix ? ` (REX: 0x${rexPrefix.toString(16)})` : ''}${this.operandSizeOverride ? ' (0x66)' : ''}`);
 
             // --- Instruction Decoding and Execution ---
 
@@ -406,10 +407,10 @@ export class CPU {
                     const sourceValue = this.readRegister(sourceRegName, 8);
 
                     switch (crIdx) {
-                        case 0: this.cr0 = sourceValue; console.log(`Decoded: MOV CR0, ${sourceRegName.toUpperCase()} (0x${sourceValue.toString(16)}n)`); this.updateCPUMode(); break;
-                        case 2: this.cr2 = sourceValue; console.log(`Decoded: MOV CR2, ${sourceRegName.toUpperCase()} (0x${sourceValue.toString(16)}n)`); break;
-                        case 3: this.cr3 = sourceValue; console.log(`Decoded: MOV CR3, ${sourceRegName.toUpperCase()} (0x${sourceValue.toString(16)}n)`); break;
-                        case 4: this.cr4 = sourceValue; console.log(`Decoded: MOV CR4, ${sourceRegName.toUpperCase()} (0x${sourceValue.toString(16)}n)`); this.updateCPUMode(); break;
+                        case 0: this.cr0 = sourceValue; utils.log(`Decoded: MOV CR0, ${sourceRegName.toUpperCase()} (0x${sourceValue.toString(16)}n)`); this.updateCPUMode(); break;
+                        case 2: this.cr2 = sourceValue; utils.log(`Decoded: MOV CR2, ${sourceRegName.toUpperCase()} (0x${sourceValue.toString(16)}n)`); break;
+                        case 3: this.cr3 = sourceValue; utils.log(`Decoded: MOV CR3, ${sourceRegName.toUpperCase()} (0x${sourceValue.toString(16)}n)`); break;
+                        case 4: this.cr4 = sourceValue; utils.log(`Decoded: MOV CR4, ${sourceRegName.toUpperCase()} (0x${sourceValue.toString(16)}n)`); this.updateCPUMode(); break;
                         default: console.warn(`MOV CR${crIdx}, ${sourceRegName.toUpperCase()} not fully implemented/valid.`); 
                     }
                     return true;
@@ -424,7 +425,7 @@ export class CPU {
                     if (msrAddr === 0xC0000080n) { // EFER MSR
                         this.efer = value;
                         if ((this.efer & CPU.EFER_LME) !== 0n) {
-                            console.log(`Long Mode Enable (LME) bit set in EFER!`);
+                            utils.log(`Long Mode Enable (LME) bit set in EFER!`);
                         }
                         this.updateCPUMode();
                     } else {
@@ -435,24 +436,24 @@ export class CPU {
                 // JE/JZ (0x0F 84) - near jump with 32-bit displacement
                 if (opcode === 0x84) {
                     const displacement = this.readSignedImmediate(4); // Read 32-bit signed displacement
-                    console.log(`Decoded: JE/JZ rel32 0x${displacement.toString(16)} (RIP adjusted)`);
+                    utils.log(`Decoded: JE/JZ rel32 0x${displacement.toString(16)} (RIP adjusted)`);
                     if (this.flags.zf === 1) {
                         this.rip += displacement; // Apply displacement if ZF is set
-                        console.log(`  Condition Met (ZF=1). Jumping to 0x${this.rip.toString(16)}`);
+                        utils.log(`  Condition Met (ZF=1). Jumping to 0x${this.rip.toString(16)}`);
                     } else {
-                        console.log(`  Condition Not Met (ZF=0). Not jumping.`);
+                        utils.log(`  Condition Not Met (ZF=0). Not jumping.`);
                     }
                     return true;
                 }
                 // JNE/JNZ (0x0F 85) - near jump with 32-bit displacement
                 if (opcode === 0x85) {
                     const displacement = this.readSignedImmediate(4); // Read 32-bit signed displacement
-                    console.log(`Decoded: JNE/JNZ rel32 0x${displacement.toString(16)} (RIP adjusted)`);
+                    utils.log(`Decoded: JNE/JNZ rel32 0x${displacement.toString(16)} (RIP adjusted)`);
                     if (this.flags.zf === 0) {
                         this.rip += displacement; // Apply displacement if ZF is clear
-                        console.log(`  Condition Met (ZF=0). Jumping to 0x${this.rip.toString(16)}`);
+                        utils.log(`  Condition Met (ZF=0). Jumping to 0x${this.rip.toString(16)}`);
                     } else {
-                        console.log(`  Condition Not Met (ZF=1). Not jumping.`);
+                        utils.log(`  Condition Not Met (ZF=1). Not jumping.`);
                     }
                     return true;
                 }
@@ -477,7 +478,7 @@ export class CPU {
                         this.gdtr.limit = limit;
                         this.gdtr.base = base;
 
-                        console.log(`Decoded: LGDT [0x${memOperand.address.toString(16)}] (Base: 0x${base.toString(16)}, Limit: 0x${limit.toString(16)})`);
+                        utils.log(`Decoded: LGDT [0x${memOperand.address.toString(16)}] (Base: 0x${base.toString(16)}, Limit: 0x${limit.toString(16)})`);
                         return true;
                     }
                     
@@ -493,13 +494,13 @@ export class CPU {
                         this.idtr.limit = limit;
                         this.idtr.base = base;
 
-                        console.log(`Decoded: LIDT [0x${memOperand.address.toString(16)}] (Base: 0x${base.toString(16)}, Limit: 0x${limit.toString(16)})`);
+                        utils.log(`Decoded: LIDT [0x${memOperand.address.toString(16)}] (Base: 0x${base.toString(16)}, Limit: 0x${limit.toString(16)})`);
                         return true;
                     }
                 }
 
                 // If a two-byte opcode is not handled here, it's genuinely unknown
-                console.log(`Unknown 2-byte opcode: 0x0F ${opcode.toString(16)} at 0x${currentRIPBeforeFetch.toString(16)}`);
+                utils.log(`Unknown 2-byte opcode: 0x0F ${opcode.toString(16)} at 0x${currentRIPBeforeFetch.toString(16)}`);
                 return false; // Or false if you want to halt on unknown 2-byte opcodes
             }
 
@@ -507,13 +508,13 @@ export class CPU {
 
             // NOP instruction
             if (opcode === 0x90) {
-                console.log("Decoded: NOP");
+                utils.log("Decoded: NOP");
                 return true;
             }
 
             // HLT instruction
             if (opcode === 0xF4) {
-                console.log("HLT instruction encountered. Emulation halted.");
+                utils.log("HLT instruction encountered. Emulation halted.");
                 return false;
             }
 
@@ -522,12 +523,12 @@ export class CPU {
             // JE/JZ (0x74)
             if (opcode === 0x74) {
                 const displacement = this.readSignedImmediate(1); // Read 1-byte signed displacement
-                console.log(`Decoded: JE/JZ rel8 0x${displacement.toString(16)} (RIP adjusted)`);
+                utils.log(`Decoded: JE/JZ rel8 0x${displacement.toString(16)} (RIP adjusted)`);
                 if (this.flags.zf === 1) {
                     this.rip += displacement; // Apply displacement if ZF is set
-                    console.log(`  Condition Met (ZF=1). Jumping to 0x${this.rip.toString(16)}`);
+                    utils.log(`  Condition Met (ZF=1). Jumping to 0x${this.rip.toString(16)}`);
                 } else {
-                    console.log(`  Condition Not Met (ZF=0). Not jumping.`);
+                    utils.log(`  Condition Not Met (ZF=0). Not jumping.`);
                 }
                 return true;
             }
@@ -535,12 +536,12 @@ export class CPU {
             // JNE/JNZ (0x75)
             if (opcode === 0x75) {
                 const displacement = this.readSignedImmediate(1); // Read 1-byte signed displacement
-                console.log(`Decoded: JNE/JNZ rel8 0x${displacement.toString(16)} (RIP adjusted)`);
+                utils.log(`Decoded: JNE/JNZ rel8 0x${displacement.toString(16)} (RIP adjusted)`);
                 if (this.flags.zf === 0) {
                     this.rip += displacement; // Apply displacement if ZF is clear
-                    console.log(`  Condition Met (ZF=0). Jumping to 0x${this.rip.toString(16)}`);
+                    utils.log(`  Condition Met (ZF=0). Jumping to 0x${this.rip.toString(16)}`);
                 } else {
-                    console.log(`  Condition Not Met (ZF=1). Not jumping.`);
+                    utils.log(`  Condition Not Met (ZF=1). Not jumping.`);
                 }
                 return true;
             }
@@ -590,7 +591,7 @@ export class CPU {
                     }
                 }
                 this.writeRegister(destRegName, immValue, sizeBytes);
-                console.log(`Decoded: MOV ${destRegName.toUpperCase()}, 0x${immValue.toString(16)}${sizeBytes === 8 ? 'n' : ''}`);
+                utils.log(`Decoded: MOV ${destRegName.toUpperCase()}, 0x${immValue.toString(16)}${sizeBytes === 8 ? 'n' : ''}`);
                 return true;
             }
             
@@ -652,7 +653,7 @@ export class CPU {
                     else if (sizeBytes === 8) this.writeVirtualBigUint64(destOperand.address, result);
                     else throw new Error("Unsupported memory write size for ADD.");
                 }
-                console.log(`Decoded: ADD ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, ${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''} -> Result: 0x${result.toString(16)}n`);
+                utils.log(`Decoded: ADD ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, ${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''} -> Result: 0x${result.toString(16)}n`);
                 return true;
             }
 
@@ -663,7 +664,7 @@ export class CPU {
                 const result = eaxValue + imm32;
                 this.updateArithmeticFlags(result, eaxValue, imm32, 4, 'add');
                 this.writeRegister('eax', result, 4);
-                console.log(`Decoded: ADD EAX, 0x${imm32.toString(16)} (Result: 0x${result.toString(16)})`);
+                utils.log(`Decoded: ADD EAX, 0x${imm32.toString(16)} (Result: 0x${result.toString(16)})`);
                 return true;
             }
 
@@ -733,7 +734,7 @@ export class CPU {
                 }
                 const destOperandString = destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`;
                 const srcOperandString = (dBit === 0) ? regOpName.toUpperCase() : (rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`);
-                console.log(`Decoded: OR ${destOperandString}, ${srcOperandString} (0x${destValue.toString(16)}n | 0x${sourceValue.toString(16)}n) -> Result: 0x${result.toString(16)}n`);
+                utils.log(`Decoded: OR ${destOperandString}, ${srcOperandString} (0x${destValue.toString(16)}n | 0x${sourceValue.toString(16)}n) -> Result: 0x${result.toString(16)}n`);
                 return true;
             }
 
@@ -817,7 +818,7 @@ export class CPU {
                 // Improved logging for AND
                 const destOperandString = destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`;
                 const srcOperandString = (dBit === 0) ? regOpName.toUpperCase() : (rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`);
-                console.log(`Decoded: AND ${destOperandString}, ${srcOperandString} (0x${destValue.toString(16)}n & 0x${sourceValue.toString(16)}n) -> Result: 0x${result.toString(16)}n`);
+                utils.log(`Decoded: AND ${destOperandString}, ${srcOperandString} (0x${destValue.toString(16)}n & 0x${sourceValue.toString(16)}n) -> Result: 0x${result.toString(16)}n`);
                 return true;
             }
 
@@ -883,7 +884,7 @@ export class CPU {
                     else if (sizeBytes === 8) this.writeVirtualBigUint64(destOperand.address, result);
                     else throw new Error("Unsupported memory write size for XOR.");
                 }
-                console.log(`Decoded: XOR ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, ${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''} -> Result: 0x${result.toString(16)}n`);
+                utils.log(`Decoded: XOR ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, ${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''} -> Result: 0x${result.toString(16)}n`);
                 return true;
             }
 
@@ -945,7 +946,7 @@ export class CPU {
                     else if (sizeBytes === 8) this.writeVirtualBigUint64(destOperand.address, result);
                     else throw new Error("Unsupported memory write size for SUB.");
                 }
-                console.log(`Decoded: SUB ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, ${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''} -> Result: 0x${result.toString(16)}n`);
+                utils.log(`Decoded: SUB ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, ${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''} -> Result: 0x${result.toString(16)}n`);
                 return true;
             }
 
@@ -996,7 +997,7 @@ export class CPU {
 
                 const destOperandString = (dBit === 0) ? (rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`) : regOpName.toUpperCase();
                 const srcOperandString = (dBit === 0) ? regOpName.toUpperCase() : (rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`);
-                console.log(`Decoded: CMP ${destOperandString}, ${srcOperandString} (0x${destValue.toString(16)}n - 0x${sourceValue.toString(16)}n)`);
+                utils.log(`Decoded: CMP ${destOperandString}, ${srcOperandString} (0x${destValue.toString(16)}n - 0x${sourceValue.toString(16)}n)`);
                 return true;
             }
 
@@ -1016,7 +1017,7 @@ export class CPU {
                     }
                     const result = destValue - imm32;
                     this.updateArithmeticFlags(result, destValue, imm32, sizeBytes, 'sub');
-                    console.log(`Decoded: CMP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`}, 0x${imm32.toString(16)}`);
+                    utils.log(`Decoded: CMP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`}, 0x${imm32.toString(16)}`);
                     return true;
                 }
             }
@@ -1097,7 +1098,7 @@ export class CPU {
                 
                 const mnemonic = ['ADD', 'OR', 'ADC', 'SBB', 'AND', 'SUB', 'XOR', 'CMP'][modrm.reg];
                 const rmStr = rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`;
-                console.log(`Decoded: ${mnemonic} ${rmStr}, 0x${immediateValue.toString(16)}`);
+                utils.log(`Decoded: ${mnemonic} ${rmStr}, 0x${immediateValue.toString(16)}`);
                 return true;
             }
 
@@ -1118,7 +1119,7 @@ export class CPU {
                 
                 // CMP does not store the result, it only sets flags.
 
-                console.log(`Decoded: CMP ${regName.toUpperCase()}, 0x${immediateValue.toString(16)}`);
+                utils.log(`Decoded: CMP ${regName.toUpperCase()}, 0x${immediateValue.toString(16)}`);
                 return true;
             }
 
@@ -1141,7 +1142,7 @@ export class CPU {
                 if (dBit === 0) { 
                     sourceValue = this.readRegister(regOpName, sizeBytes); 
                     destOperand = rmOperand; 
-                    console.log(`  Action: R/M(DEST) <- Reg(SRC)`);
+                    utils.log(`  Action: R/M(DEST) <- Reg(SRC)`);
                 } else { 
                     if (rmOperand.type === 'reg') {
                         sourceValue = this.readRegister(rmOperand.name, sizeBytes);
@@ -1153,7 +1154,7 @@ export class CPU {
                         else throw new Error("Unsupported memory read size.");
                     }
                     destOperand = { type: 'reg', name: regOpName }; 
-                    console.log(`  Action: Reg(DEST) <- R/M(SRC)`);
+                    utils.log(`  Action: Reg(DEST) <- R/M(SRC)`);
                 }
 
                 if (destOperand.type === 'reg') {
@@ -1166,7 +1167,7 @@ export class CPU {
                     else throw new Error("Unsupported memory write size.");
                 }
 
-                console.log(`Decoded: MOV ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, 0x${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''}`);
+                utils.log(`Decoded: MOV ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, 0x${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''}`);
                 return true;
             }
 
@@ -1219,7 +1220,7 @@ export class CPU {
                     }
                 }
                 
-                console.log(`Decoded: MOV ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`}, 0x${immValue.toString(16)}`);
+                utils.log(`Decoded: MOV ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`}, 0x${immValue.toString(16)}`);
                 return true;
             }
 
@@ -1241,7 +1242,7 @@ export class CPU {
                     this.writeVirtualUint8(rmOperand.address, Number(immValue));
                 }
             
-                console.log(`Decoded: MOV byte ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`}, 0x${immValue.toString(16)}`);
+                utils.log(`Decoded: MOV byte ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`}, 0x${immValue.toString(16)}`);
                 return true;
             }
 
@@ -1251,11 +1252,11 @@ export class CPU {
                 const sizeBytes = 8;
                 const regName = this.getRegisterString(regIdx, sizeBytes, rexPrefix !== 0);
                 const value = this.readRegister(regName, sizeBytes);
-                console.log(`PUSH ${regName.toUpperCase()} - RSP Before: 0x${this.rsp.toString(16)}`);
+                utils.log(`PUSH ${regName.toUpperCase()} - RSP Before: 0x${this.rsp.toString(16)}`);
                 this.rsp -= BigInt(sizeBytes);
                 this.writeVirtualBigUint64(this.rsp, value);
-                console.log(`Decoded: PUSH ${regName.toUpperCase()} (0x${value.toString(16)}n)`);
-                console.log(`PUSH ${regName.toUpperCase()} - RSP After: 0x${this.rsp.toString(16)}`);
+                utils.log(`Decoded: PUSH ${regName.toUpperCase()} (0x${value.toString(16)}n)`);
+                utils.log(`PUSH ${regName.toUpperCase()} - RSP After: 0x${this.rsp.toString(16)}`);
                 return true;
             }
 
@@ -1276,12 +1277,12 @@ export class CPU {
                         else if (sizeBytes === 8) value = this.readVirtualBigUint64(rmOperand.address);
                         else throw new Error("Unsupported memory read size for PUSH r/m.");
                     }
-                    console.log(`PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP Before: 0x${this.rsp.toString(16)}`);
+                    utils.log(`PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP Before: 0x${this.rsp.toString(16)}`);
                     this.rsp -= BigInt(sizeBytes);
                     this.writeVirtualBigUint64(this.rsp, value);
                     
-                    console.log(`Decoded: PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (0x${value.toString(16)}n)`);
-                    console.log(`PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP After: 0x${this.rsp.toString(16)}`);
+                    utils.log(`Decoded: PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (0x${value.toString(16)}n)`);
+                    utils.log(`PUSH ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP After: 0x${this.rsp.toString(16)}`);
                     return true;
                 }
             }
@@ -1291,13 +1292,13 @@ export class CPU {
                 const regIdx = opcode - 0x58;
                 const sizeBytes = 8;
                 const regName = this.getRegisterString(regIdx, sizeBytes, rexPrefix !== 0);
-                console.log(`POP ${regName.toUpperCase()} - RSP Before: 0x${this.rsp.toString(16)}`);
+                utils.log(`POP ${regName.toUpperCase()} - RSP Before: 0x${this.rsp.toString(16)}`);
                 const value = this.readVirtualBigUint64(this.rsp);
                 this.writeRegister(regName, value, sizeBytes);
                 this.rsp += BigInt(sizeBytes);
                 
-                console.log(`Decoded: POP ${regName.toUpperCase()} (0x${value.toString(16)}n)`);
-                console.log(`POP ${regName.toUpperCase()} - RSP After: 0x${this.rsp.toString(16)}`);
+                utils.log(`Decoded: POP ${regName.toUpperCase()} (0x${value.toString(16)}n)`);
+                utils.log(`POP ${regName.toUpperCase()} - RSP After: 0x${this.rsp.toString(16)}`);
                 return true;
             }
 
@@ -1308,7 +1309,7 @@ export class CPU {
                     let sizeBytes = defaultOperandSize;
                     const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_x, rex_b, rexPrefix !== 0);
                     
-                    console.log(`POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP Before: 0x${this.rsp.toString(16)}`);
+                    utils.log(`POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP Before: 0x${this.rsp.toString(16)}`);
                     this.rsp += BigInt(sizeBytes);
                     this.writeRegister(rmOperand.name, value, sizeBytes);
 
@@ -1323,8 +1324,8 @@ export class CPU {
                         else throw new Error("Unsupported memory read size for POP r/m.");
                     }
 
-                    console.log(`Decoded: POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (0x${value.toString(16)}n)`);
-                    console.log(`POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP After: 0x${this.rsp.toString(16)}`);
+                    utils.log(`Decoded: POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (0x${value.toString(16)}n)`);
+                    utils.log(`POP ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} - RSP After: 0x${this.rsp.toString(16)}`);
                     return true;
                 }
             }
@@ -1333,13 +1334,13 @@ export class CPU {
             if (opcode === 0xE8) {
                 const displacement = this.readSignedImmediate(4);
                 const retAddr = this.rip;
-                console.log(`CALL rel32 - RSP Before: 0x${this.rsp.toString(16)}`);
+                utils.log(`CALL rel32 - RSP Before: 0x${this.rsp.toString(16)}`);
                 this.rsp -= 8n;
                 this.writeVirtualBigUint64(this.rsp, retAddr);
                 this.rip += BigInt(displacement);
 
-                console.log(`Decoded: CALL rel32 0x${displacement.toString(16)} (RIP adjusted to 0x${this.rip.toString(16)})`);
-                console.log(`CALL rel32 - RSP After: 0x${this.rsp.toString(16)}`);
+                utils.log(`Decoded: CALL rel32 0x${displacement.toString(16)} (RIP adjusted to 0x${this.rip.toString(16)})`);
+                utils.log(`CALL rel32 - RSP After: 0x${this.rsp.toString(16)}`);
                 return true;
             }
 
@@ -1362,40 +1363,40 @@ export class CPU {
                     }
                     
                     const retAddr = this.rip;
-                    console.log(`CALL r/m - RSP Before: 0x${this.rsp.toString(16)}`);
+                    utils.log(`CALL r/m - RSP Before: 0x${this.rsp.toString(16)}`);
                     this.rsp -= 8n;
                     this.writeVirtualBigUint64(this.rsp, retAddr);
                     this.rip = tgtAddr;
 
-                    console.log(`Decoded: CALL ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (Indirect, jumping to 0x${this.rip.toString(16)})`);
-                    console.log(`CALL r/m - RSP After: 0x${this.rsp.toString(16)}`);
+                    utils.log(`Decoded: CALL ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (Indirect, jumping to 0x${this.rip.toString(16)})`);
+                    utils.log(`CALL r/m - RSP After: 0x${this.rsp.toString(16)}`);
                     return true;
                 }
             }
 
             // RET (0xC3) - Near return
             if (opcode === 0xC3) {
-                console.log(`RET - RSP Before: 0x${this.rsp.toString(16)}`);
+                utils.log(`RET - RSP Before: 0x${this.rsp.toString(16)}`);
                 const retAddr = this.readVirtualBigUint64(this.rsp);
                 this.rsp += 8n;
                 this.rip = retAddr;
 
-                console.log(`Decoded: RET (Near, jumping to 0x${this.rip.toString(16)})`);
-                console.log(`RET - RSP After: 0x${this.rsp.toString(16)}`);
+                utils.log(`Decoded: RET (Near, jumping to 0x${this.rip.toString(16)})`);
+                utils.log(`RET - RSP After: 0x${this.rsp.toString(16)}`);
                 return true;
             }
 
             // RET imm16 (0xC2) - Near, return with immediate
             if (opcode === 0xC2) {
                 const imm16 = this.readSignedImmediate(2);
-                console.log(`RET imm16 - RSP Before: 0x${this.rsp.toString(16)}`);
+                utils.log(`RET imm16 - RSP Before: 0x${this.rsp.toString(16)}`);
                 const retAddr = this.readVirtualBigUint64(this.rsp);
                 this.rsp += 8n;
                 this.rip = retAddr;
                 this.rsp += BigInt(imm16);
 
-                console.log(`Decoded: RET imm16 (jumping to 0x${this.rip.toString(16)}, stack adjust by 0x${imm16.toString(16)})`);
-                console.log(`RET imm16 - RSP After: 0x${this.rsp.toString(16)}`);
+                utils.log(`Decoded: RET imm16 (jumping to 0x${this.rip.toString(16)}, stack adjust by 0x${imm16.toString(16)})`);
+                utils.log(`RET imm16 - RSP After: 0x${this.rsp.toString(16)}`);
                 return true;
             }
 
@@ -1421,7 +1422,7 @@ export class CPU {
                 // ...but we write the address itself to the destination register.
                 this.writeRegister(destRegName, effectiveAddress, sizeBytes);
 
-                console.log(`Decoded: LEA ${destRegName.toUpperCase()}, [address] (Calculated address: 0x${effectiveAddress.toString(16)})`);
+                utils.log(`Decoded: LEA ${destRegName.toUpperCase()}, [address] (Calculated address: 0x${effectiveAddress.toString(16)})`);
                 return true;
             }
 
@@ -1458,7 +1459,7 @@ export class CPU {
                 // Parity Flag (PF) is also affected, but you can add that later.
 
                 const rmOperandStr = rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`;
-                console.log(`Decoded: TEST ${rmOperandStr}, ${regOpName.toUpperCase()}`);
+                utils.log(`Decoded: TEST ${rmOperandStr}, ${regOpName.toUpperCase()}`);
                 return true;
             }
 
@@ -1477,7 +1478,7 @@ export class CPU {
                 this.flags.sf = ((result & 0x80n) !== 0n) ? 1 : 0;
                 // Note: Parity Flag (PF) is also affected but not implemented here.
 
-                console.log(`Decoded: TEST AL, 0x${imm8.toString(16)} (Result for flags: 0x${result.toString(16)})`);
+                utils.log(`Decoded: TEST AL, 0x${imm8.toString(16)} (Result for flags: 0x${result.toString(16)})`);
                 return true;
             }
 
@@ -1506,7 +1507,7 @@ export class CPU {
                 this.flags.sf = ((result & signBitMask) !== 0n) ? 1 : 0;
                 // Note: Parity Flag (PF) is also affected but not implemented here.
 
-                console.log(`Decoded: TEST ${regName.toUpperCase()}, 0x${immediateValue.toString(16)} (Result for flags: 0x${result.toString(16)})`);
+                utils.log(`Decoded: TEST ${regName.toUpperCase()}, 0x${immediateValue.toString(16)} (Result for flags: 0x${result.toString(16)})`);
                 return true;
             }
 
@@ -1570,19 +1571,19 @@ export class CPU {
                 }
 
                 const rmOperandStr = rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`;
-                console.log(`Decoded: ${mnemonic} ${rmOperandStr}, ${shiftCount}`);
+                utils.log(`Decoded: ${mnemonic} ${rmOperandStr}, ${shiftCount}`);
                 return true;
             }
 
             // JL rel8 (0x7C)
             if (opcode === 0x7C) {
                 const displacement = this.readSignedImmediate(1);
-                console.log(`Decoded: JL rel8 0x${displacement.toString(16)}`);
+                utils.log(`Decoded: JL rel8 0x${displacement.toString(16)}`);
                 if (this.flags.sf !== this.flags.of) { // Condition for JL
                     this.rip += displacement;
-                    console.log(`  Condition Met (SF!=OF). Jumping to 0x${this.rip.toString(16)}`);
+                    utils.log(`  Condition Met (SF!=OF). Jumping to 0x${this.rip.toString(16)}`);
                 } else {
-                    console.log(`  Condition Not Met. Not jumping.`);
+                    utils.log(`  Condition Not Met. Not jumping.`);
                 }
                 return true;
             }
@@ -1590,12 +1591,12 @@ export class CPU {
             // JB rel8 (0x72)
             if (opcode === 0x72) {
                 const displacement = this.readSignedImmediate(1);
-                console.log(`Decoded: JB rel8 0x${displacement.toString(16)}`);
+                utils.log(`Decoded: JB rel8 0x${displacement.toString(16)}`);
                 if (this.flags.cf !== 0) { // Condition for JB
                     this.rip += displacement;
-                    console.log(`  Condition Met (CF!=0). Jumping to 0x${this.rip.toString(16)}`);
+                    utils.log(`  Condition Met (CF!=0). Jumping to 0x${this.rip.toString(16)}`);
                 } else {
-                    console.log(`  Condition Not Met. Not jumping.`);
+                    utils.log(`  Condition Not Met. Not jumping.`);
                 }
                 return true;
             }
@@ -1608,7 +1609,7 @@ export class CPU {
                 // Add the displacement to the current RIP to perform the jump
                 this.rip += displacement;
                 
-                console.log(`Decoded: JMP rel8 0x${displacement.toString(16)} (Jumping to 0x${this.rip.toString(16)})`);
+                utils.log(`Decoded: JMP rel8 0x${displacement.toString(16)} (Jumping to 0x${this.rip.toString(16)})`);
                 return true;
             }
 
@@ -1633,7 +1634,7 @@ export class CPU {
                 this.disassembleRFlags(new_rflags);
                 this.rsp += 8n;
                 
-                console.log(`Decoded: IRETQ (Returning to 0x${this.rip.toString(16)}, restoring flags)`);
+                utils.log(`Decoded: IRETQ (Returning to 0x${this.rip.toString(16)}, restoring flags)`);
                 return true;
             }
 
@@ -1645,7 +1646,7 @@ export class CPU {
                 
                 this.io.portOut(Number(port), Number(value), 1); // size is 1 byte
                 
-                console.log(`Decoded: OUT DX, AL (Wrote 0x${value.toString(16)} to port 0x${port.toString(16)})`);
+                utils.log(`Decoded: OUT DX, AL (Wrote 0x${value.toString(16)} to port 0x${port.toString(16)})`);
                 return true;
             }
 
@@ -1656,7 +1657,7 @@ export class CPU {
                 
                 this.io.portOut(port, Number(value), 1); // Send the data to the I/O bus
 
-                console.log(`Decoded: OUT imm8, AL (Wrote 0x${value.toString(16)} to port 0x${port.toString(16)})`);
+                utils.log(`Decoded: OUT imm8, AL (Wrote 0x${value.toString(16)} to port 0x${port.toString(16)})`);
                 return true;
             }
 
@@ -1673,7 +1674,7 @@ export class CPU {
                 // but the default is to increment, which is all we need here).
                 this.rsi += 1n;
     
-                console.log(`Decoded: LODSB (Loaded 0x${value.toString(16)} into AL, RSI is now 0x${this.rsi.toString(16)})`);
+                utils.log(`Decoded: LODSB (Loaded 0x${value.toString(16)} into AL, RSI is now 0x${this.rsi.toString(16)})`);
                 return true;
             }
 
@@ -1683,7 +1684,7 @@ export class CPU {
                 const value = this.io.portIn(port, 1);   // Read 1 byte from the I/O bus
                 this.writeRegister('al', value, 1);      // Write the value to AL
 
-                console.log(`Decoded: IN AL, imm8 (Read 0x${value.toString(16)} from port 0x${port.toString(16)} into AL)`);
+                utils.log(`Decoded: IN AL, imm8 (Read 0x${value.toString(16)} from port 0x${port.toString(16)} into AL)`);
                 return true;
             }
 
@@ -1693,12 +1694,12 @@ export class CPU {
                 const value = this.io.portIn(Number(port), 1); // Read 1 byte from the I/O bus
                 this.writeRegister('al', value, 1);        // Write the value to AL
 
-                console.log(`Decoded: IN AL, DX (Read 0x${value.toString(16)} from port 0x${port.toString(16)} into AL)`);
+                utils.log(`Decoded: IN AL, DX (Read 0x${value.toString(16)} from port 0x${port.toString(16)} into AL)`);
                 return true;
             }
 
             // If an instruction falls through all specific handlers, it's truly unknown
-            console.log(`Unknown opcode: 0x${(twoByteOpcode ? '0F ' : '')}${opcode.toString(16)} at 0x${currentRIPBeforeFetch.toString(16)}`); // Use currentRIPBeforeFetch for unknown opcodes
+            utils.log(`Unknown opcode: 0x${(twoByteOpcode ? '0F ' : '')}${opcode.toString(16)} at 0x${currentRIPBeforeFetch.toString(16)}`); // Use currentRIPBeforeFetch for unknown opcodes
             return false;
         } catch (e) {
             if (e instanceof PageFaultException) {
@@ -1844,7 +1845,7 @@ export class CPU {
         }
 
         const addr = baseValue + (indexValue * BigInt(scale));
-        console.log(`  SIB Decoded: Base=${baseRegName}, Index=${idxRegName}, Scale=${scale} => Address component = 0x${addr.toString(16)}`);
+        utils.log(`  SIB Decoded: Base=${baseRegName}, Index=${idxRegName}, Scale=${scale} => Address component = 0x${addr.toString(16)}`);
         return addr;
     }
 
@@ -1916,11 +1917,11 @@ export class CPU {
         const lmeBit = (this.efer & CPU.EFER_LME) !== 0n; 
 
         // --- NEW DEBUGGING LOGS ---
-        console.log(`\n--- DEBUG: updateCPUMode called ---`);
-        console.log(`  Current CR0:  0x${this.cr0.toString(16).padStart(16, '0')} (PE: ${peBit}, PG: ${pgBit})`);
-        console.log(`  Current CR4:  0x${this.cr4.toString(16).padStart(16, '0')} (PAE: ${paeBit})`);
-        console.log(`  Current EFER: 0x${this.efer.toString(16).padStart(16, '0')} (LME: ${lmeBit})`);
-        console.log(`  Combined Condition (LME && PAE && PG): ${lmeBit && paeBit && pgBit}`);
+        utils.log(`\n--- DEBUG: updateCPUMode called ---`);
+        utils.log(`  Current CR0:  0x${this.cr0.toString(16).padStart(16, '0')} (PE: ${peBit}, PG: ${pgBit})`);
+        utils.log(`  Current CR4:  0x${this.cr4.toString(16).padStart(16, '0')} (PAE: ${paeBit})`);
+        utils.log(`  Current EFER: 0x${this.efer.toString(16).padStart(16, '0')} (LME: ${lmeBit})`);
+        utils.log(`  Combined Condition (LME && PAE && PG): ${lmeBit && paeBit && pgBit}`);
         // --- END DEBUGGING LOGS ---
     
         if (!peBit) {
@@ -1928,19 +1929,19 @@ export class CPU {
         } else { 
             if (lmeBit && paeBit && pgBit) { 
                 this.mode = 'long';
-                console.log("CPU Mode: Long Mode (64-bit) enabled.");
+                utils.log("CPU Mode: Long Mode (64-bit) enabled.");
             } else if (pgBit && paeBit) { 
                 this.mode = 'protected_pae'; 
-                console.log("CPU Mode: Protected Mode (32-bit) with PAE enabled.");
+                utils.log("CPU Mode: Protected Mode (32-bit) with PAE enabled.");
             } else if (pgBit) {
                 this.mode = 'protected_32bit_paging'; 
-                console.log("CPU Mode: Protected Mode (32-bit) with Paging enabled.");
+                utils.log("CPU Mode: Protected Mode (32-bit) with Paging enabled.");
             } else {
                 this.mode = 'protected'; 
-                console.log("CPU Mode: Protected Mode (32-bit) enabled (no paging).");
+                utils.log("CPU Mode: Protected Mode (32-bit) enabled (no paging).");
             }
         }
-        console.log(`DEBUG: updateCPUMode - Mode finalized as: ${this.mode}\n`);
+        utils.log(`DEBUG: updateCPUMode - Mode finalized as: ${this.mode}\n`);
     }
 
     readVirtualUint8(virtualAddr) {
@@ -2032,16 +2033,16 @@ export class CPU {
         }
 
         // --- Paging Enabled for Long Mode (the real work begins here) ---
-        console.log(`Paging: Translating virtual address 0x${virtualAddr.toString(16)} in ${this.mode} mode.`);
+        utils.log(`Paging: Translating virtual address 0x${virtualAddr.toString(16)} in ${this.mode} mode.`);
 
         const pml4BasePhys = this.cr3 & ~0xFFFn;
-        console.log(`  PML4 Base Phys: 0x${pml4BasePhys.toString(16).padStart(16, '0')}`); 
+        utils.log(`  PML4 Base Phys: 0x${pml4BasePhys.toString(16).padStart(16, '0')}`); 
 
         const pml4Index = (virtualAddr >> 39n) & 0x1FFn; 
         let pml4eAddr = pml4BasePhys + (pml4Index * 8n); 
-        console.log(`  PML4E Addr: 0x${pml4eAddr.toString(16).padStart(16, '0')} (Index: ${pml4Index})`);
+        utils.log(`  PML4E Addr: 0x${pml4eAddr.toString(16).padStart(16, '0')} (Index: ${pml4Index})`);
         let pml4e = this.memory.readBigUint64(Number(pml4eAddr));
-        console.log(`  PML4E Value: 0x${pml4e.toString(16).padStart(16, '0')}`);
+        utils.log(`  PML4E Value: 0x${pml4e.toString(16).padStart(16, '0')}`);
 
         if ((pml4e & CPU.PTE_PRESENT) === 0n) {
             console.error(`Page Fault (#PF): PML4E not present for VA 0x${virtualAddr.toString(16)}`);
@@ -2049,12 +2050,12 @@ export class CPU {
         }        
 
         let pdptBasePhys = pml4e & ~0xFFFn;
-        console.log(`  PDPT Base Phys: 0x${pdptBasePhys.toString(16).padStart(16, '0')}`); 
+        utils.log(`  PDPT Base Phys: 0x${pdptBasePhys.toString(16).padStart(16, '0')}`); 
         const pdptIndex = (virtualAddr >> 30n) & 0x1FFn; 
         let pdpteAddr = pdptBasePhys + (pdptIndex * 8n); 
-        console.log(`  PDPTE Addr: 0x${pdpteAddr.toString(16).padStart(16, '0')} (Index: ${pdptIndex})`);
+        utils.log(`  PDPTE Addr: 0x${pdpteAddr.toString(16).padStart(16, '0')} (Index: ${pdptIndex})`);
         let pdpte = this.memory.readBigUint64(Number(pdpteAddr));
-        console.log(`  PDPTE Value: 0x${pdpte.toString(16).padStart(16, '0')}`);
+        utils.log(`  PDPTE Value: 0x${pdpte.toString(16).padStart(16, '0')}`);
 
         if ((pdpte & CPU.PTE_PRESENT) === 0n) {
             console.error(`Page Fault (#PF): PDPTE not present for VA 0x${virtualAddr.toString(16)}`);
@@ -2065,17 +2066,17 @@ export class CPU {
             const pageBaseAddr = pdpte & 0xFFFFFFFC0000000n; 
             const offset = virtualAddr & 0x3FFFFFFFfn; 
             const physical = pageBaseAddr | offset;
-            console.log(`  Translated 1GB page: VA 0x${virtualAddr.toString(16)} -> PA 0x${physical.toString(16)}`);
+            utils.log(`  Translated 1GB page: VA 0x${virtualAddr.toString(16)} -> PA 0x${physical.toString(16)}`);
             return physical;
         }
 
         let pdBasePhys = pdpte & ~0xFFFn;
-        console.log(`  PD Base Phys: 0x${pdBasePhys.toString(16).padStart(16, '0')}`); 
+        utils.log(`  PD Base Phys: 0x${pdBasePhys.toString(16).padStart(16, '0')}`); 
         const pdIndex = (virtualAddr >> 21n) & 0x1FFn; 
         let pdeAddr = pdBasePhys + (pdIndex * 8n); 
-        console.log(`  PDE Addr: 0x${pdeAddr.toString(16).padStart(16, '0')} (Index: ${pdIndex})`);
+        utils.log(`  PDE Addr: 0x${pdeAddr.toString(16).padStart(16, '0')} (Index: ${pdIndex})`);
         let pde = this.memory.readBigUint64(Number(pdeAddr));
-        console.log(`  PDE Value: 0x${pde.toString(16).padStart(16, '0')}`);
+        utils.log(`  PDE Value: 0x${pde.toString(16).padStart(16, '0')}`);
 
         if ((pde & CPU.PTE_PRESENT) === 0n) {
             console.error(`Page Fault (#PF): PDE not present for VA 0x${virtualAddr.toString(16)}`);
@@ -2086,17 +2087,17 @@ export class CPU {
             const pageBaseAddr = pde & 0xFFFFFFFE00000n; 
             const offset = virtualAddr & 0x1FFFFFn; 
             const physical = pageBaseAddr | offset;
-            console.log(`  Translated 2MB page: VA 0x${virtualAddr.toString(16)} -> PA 0x${physical.toString(16)}`);
+            utils.log(`  Translated 2MB page: VA 0x${virtualAddr.toString(16)} -> PA 0x${physical.toString(16)}`);
             return physical;
         }
 
         let ptBasePhys = pde & ~0xFFFn;
-        console.log(`  PT Base Phys: 0x${ptBasePhys.toString(16).padStart(16, '0')}`); 
+        utils.log(`  PT Base Phys: 0x${ptBasePhys.toString(16).padStart(16, '0')}`); 
         const ptIndex = (virtualAddr >> 12n) & 0x1FFn; 
         let pteAddr = ptBasePhys + (ptIndex * 8n); 
-        console.log(`  PTE Addr: 0x${pteAddr.toString(16).padStart(16, '0')} (Index: ${ptIndex})`);
+        utils.log(`  PTE Addr: 0x${pteAddr.toString(16).padStart(16, '0')} (Index: ${ptIndex})`);
         let pte = this.memory.readBigUint64(Number(pteAddr));
-        console.log(`  PTE Value: 0x${pte.toString(16).padStart(16, '0')}`);
+        utils.log(`  PTE Value: 0x${pte.toString(16).padStart(16, '0')}`);
 
         if ((pte & CPU.PTE_PRESENT) === 0n) {
             console.error(`Page Fault (#PF): PTE not present for VA 0x${virtualAddr.toString(16)}`);
@@ -2106,21 +2107,21 @@ export class CPU {
         const pageBaseAddr = pte & ~0xFFFn; 
         const offset = virtualAddr & 0xFFFn; 
         const physical = pageBaseAddr | offset;
-        console.log(`  Final Page Base Addr: 0x${pageBaseAddr.toString(16).padStart(16, '0')}`);
-        console.log(`  Page Offset: 0x${offset.toString(16).padStart(3, '0')}`);
-        console.log(`  Calculated Physical: 0x${physical.toString(16).padStart(16, '0')}`);
+        utils.log(`  Final Page Base Addr: 0x${pageBaseAddr.toString(16).padStart(16, '0')}`);
+        utils.log(`  Page Offset: 0x${offset.toString(16).padStart(3, '0')}`);
+        utils.log(`  Calculated Physical: 0x${physical.toString(16).padStart(16, '0')}`);
 
         return physical;
     }
 
     triggerInterrupt(interruptNumber, errorCode = null) {
-        console.log(`--- INTERRUPT TRIGGERED: #${interruptNumber} ---`);
+        utils.log(`--- INTERRUPT TRIGGERED: #${interruptNumber} ---`);
 
         const descriptorAddr = this.idtr.base + BigInt(interruptNumber * 16);
 
         const lowSlice = this.readVirtualBigUint64(descriptorAddr);
         const highSlice = this.readVirtualBigUint64(descriptorAddr + 8n);
-        console.log(`DEBUG: Descriptor at 0x${descriptorAddr.toString(16)} is: LOW=0x${lowSlice.toString(16)} HIGH=0x${highSlice.toString(16)}`);
+        utils.log(`DEBUG: Descriptor at 0x${descriptorAddr.toString(16)} is: LOW=0x${lowSlice.toString(16)} HIGH=0x${highSlice.toString(16)}`);
 
         // === FINAL, CORRECTED PARSING LOGIC v3 ===
         // This logic correctly decodes the structure created by the assembly code.
@@ -2154,7 +2155,7 @@ export class CPU {
         // Jump to the handler
         this.rip = handlerAddr;
         
-        console.log(`  Jumping to handler at 0x${handlerAddr.toString(16)}`);
+        utils.log(`  Jumping to handler at 0x${handlerAddr.toString(16)}`);
     }
 
     assembleRFlags() {
