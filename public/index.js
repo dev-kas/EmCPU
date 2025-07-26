@@ -10,7 +10,7 @@ EmCPU.setMode("prod");
 // --- Boot Sector ---
 let bootsector;
 {
-    const res = await fetch("/out/boot.bin");
+    const res = await fetch("../out/boot.bin");
     if (!res.ok) throw new Error("Failed to fetch boot sector: " + res.statusText);
     const buf = await res.arrayBuffer();
     bootsector = new Uint8Array(buf);

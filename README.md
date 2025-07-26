@@ -2,6 +2,10 @@
 
 A pure JavaScript implementation of an x86-64 CPU emulator with support for protected mode, paging, and basic instruction execution. This project aims to provide an educational tool for understanding low-level computer architecture and CPU emulation.
 
+## Live Demo
+
+You can try out the emulator here: [Live Demo](https://dev-kas.github.io/EmCPU/public/index.html).
+
 ## Features
 
 - 64-bit x86-64 CPU emulation
@@ -13,36 +17,40 @@ A pure JavaScript implementation of an x86-64 CPU emulator with support for prot
 
 ## Project Structure
 
-- `index.js` - Main entry point and emulator loop
-- `cpu.js` - CPU emulation core
-- `memory.js` - Memory management and access
-- `bootsector.asm` - Example boot sector assembly code
-- `build.bat` - Script to assemble the boot sector
+- `index.html` - Main entry point and emulator loop
+- `cpu/*.js` - CPU emulation core
+- `boot/boot.asm` - Example boot sector assembly code
+- `Makefile` - Script to assemble the boot sector
 
 ## Prerequisites
 
 - Node.js (v14 or later)
 - NASM (for assembling boot sector)
+- Make (for build commands)
 
 ## Getting Started
 
 1. Clone the repository:
+
    ```bash
-   git clone https://github.com/dev-kas/emcpu.git
-   cd emcpu
+   git clone https://github.com/dev-kas/EmCPU.git
+   cd EmCPU
    ```
 
 2. Install dependencies:
+
    ```bash
    npm install
    ```
 
 3. Build the boot sector (requires NASM):
+
    ```bash
-   .\build.bat
+   make
    ```
 
 4. Run the emulator:
+
    ```bash
    npm start
    ```
@@ -52,13 +60,13 @@ A pure JavaScript implementation of an x86-64 CPU emulator with support for prot
 The boot sector can be assembled using NASM:
 
 ```bash
-nasm -f bin -o bootsector.bin bootsector.asm
+nasm -f bin -o out/boot.bin boot/boot.asm
 ```
 
 Or by using the provided build script:
 
 ```bash
-.\build.bat
+make
 ```
 
 ## Implementation Details
@@ -66,6 +74,7 @@ Or by using the provided build script:
 ### CPU Emulation
 
 The CPU emulator supports:
+
 - 64-bit general purpose registers
 - Basic arithmetic and logic operations
 - Memory access instructions
