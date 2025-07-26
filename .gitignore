@@ -36,4 +36,5 @@ yarn-error.log*
 ehthumbs.db
 Thumbs.db
 
-out/
+out/*
+!out/boot.bin
