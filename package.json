@@ -10,7 +10,7 @@
   },
   "keywords": [],
   "author": "dev-kas",
-  "license": "ISC",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "devDependencies": {
     "@rollup/plugin-terser": "^0.4.4",

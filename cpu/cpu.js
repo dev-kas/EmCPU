@@ -1262,17 +1262,17 @@ export class CPU {
                 
                 const fullRegNameForVerify = this.registers[regOpName]; // Get the full 64-bit register name (e.g., 'rax' from 'ax')
 
-                console.info(`--- MOV [r/m],reg START (Opcode: 0x${opcode.toString(16)}) ---`);
-                console.info(`  dBit=${dBit}, sizeBytes=${sizeBytes}, regOp=${regOpName}, rmOperand.addr=0x${rmOperand.address?.toString(16)}`);
+                utils.log(`--- MOV [r/m],reg START (Opcode: 0x${opcode.toString(16)}) ---`);
+                utils.log(`  dBit=${dBit}, sizeBytes=${sizeBytes}, regOp=${regOpName}, rmOperand.addr=0x${rmOperand.address?.toString(16)}`);
 
                 if (dBit === 0) { // Direction: r/m <- reg
                     const sourceValue = this.readRegister(regOpName, sizeBytes);
-                    console.info(`  DIRECTION: r/m <- reg. Writing 0x${sourceValue.toString(16)} from ${regOpName}...`);
+                    utils.log(`  DIRECTION: r/m <- reg. Writing 0x${sourceValue.toString(16)} from ${regOpName}...`);
                     
                     if (rmOperand.type === 'reg') {
                         this.writeRegister(rmOperand.name, sourceValue, sizeBytes);
                     } else { // Memory Destination
-                        console.info(`  ...to MEMORY at 0x${rmOperand.address.toString(16)}`);
+                        utils.log(`  ...to MEMORY at 0x${rmOperand.address.toString(16)}`);
                         if (sizeBytes === 1) this.writeVirtualUint8(rmOperand.address, sourceValue);
                         else if (sizeBytes === 2) this.writeVirtualUint16(rmOperand.address, sourceValue);
                         else if (sizeBytes === 4) this.writeVirtualUint32(rmOperand.address, sourceValue);
@@ -1282,7 +1282,7 @@ export class CPU {
                     const destRegName = regOpName;
                     let sourceValue;
                     
-                    console.info(`  DIRECTION: reg <- r/m. Reading from r/m operand...`);
+                    utils.log(`  DIRECTION: reg <- r/m. Reading from r/m operand...`);
 
                     if (rmOperand.type === 'reg') {
                         sourceValue = this.readRegister(rmOperand.name, sizeBytes);
@@ -1293,14 +1293,14 @@ export class CPU {
                                     : this.readVirtualBigUint64(rmOperand.address);
                     }
                     
-                    console.info(`  Read value 0x${sourceValue.toString(16)} from r/m. Writing to ${destRegName}.`);
+                    utils.log(`  Read value 0x${sourceValue.toString(16)} from r/m. Writing to ${destRegName}.`);
                     this.writeRegister(destRegName, sourceValue, sizeBytes);
 
                     // === THIS IS THE CRITICAL NEW LOG ===
-                    console.info(`  VERIFY: After writing to ${destRegName}, the full register ${fullRegNameForVerify} is now 0x${this[fullRegNameForVerify].toString(16)}`);
+                    utils.log(`  VERIFY: After writing to ${destRegName}, the full register ${fullRegNameForVerify} is now 0x${this[fullRegNameForVerify].toString(16)}`);
                     // ===================================
                 }
-                console.info(`--- MOV [r/m],reg END ---`);
+                utils.log(`--- MOV [r/m],reg END ---`);
                 return true;
             }
 
@@ -2371,9 +2371,9 @@ export class CPU {
 
         const descriptorAddr = this.idtr.base + BigInt(interruptNumber * 16);
 
-        console.log(`  IDTR.base = 0x${this.idtr.base.toString(16)}`);
-        console.log(`  Interrupt #${interruptNumber} @ 0x${descriptorAddr.toString(16)}`);
-        console.log(`  Raw bytes: ${[...new Uint8Array(this.memory.buffer.slice(Number(descriptorAddr), Number(descriptorAddr + 16n)))]
+        utils.log(`  IDTR.base = 0x${this.idtr.base.toString(16)}`);
+        utils.log(`  Interrupt #${interruptNumber} @ 0x${descriptorAddr.toString(16)}`);
+        utils.log(`  Raw bytes: ${[...new Uint8Array(this.memory.buffer.slice(Number(descriptorAddr), Number(descriptorAddr + 16n)))]
             .map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
 
         const lowSlice = this.readVirtualBigUint64(descriptorAddr);
@@ -2411,10 +2411,10 @@ export class CPU {
         this.rsp -= 8n;
         this.writeVirtualBigUint64(this.rsp, BigInt(interruptNumber));
 
-        console.log(`DEBUG: Parsed handlerAddr = 0x${handlerAddr.toString(16)}`);
-        console.log(`  offset_15_0  = 0x${offset_15_0.toString(16)}`);
-        console.log(`  offset_31_16 = 0x${offset_31_16.toString(16)}`);
-        console.log(`  offset_63_32 = 0x${offset_63_32.toString(16)}`);
+        utils.log(`DEBUG: Parsed handlerAddr = 0x${handlerAddr.toString(16)}`);
+        utils.log(`  offset_15_0  = 0x${offset_15_0.toString(16)}`);
+        utils.log(`  offset_31_16 = 0x${offset_31_16.toString(16)}`);
+        utils.log(`  offset_63_32 = 0x${offset_63_32.toString(16)}`);
 
         // Jump to the handler
         this.rip = handlerAddr;

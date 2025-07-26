@@ -1,3 +1,5 @@
+import * as utils from "./utils.js";
+
 export class Memory {
     constructor(size) {
         this.buffer = new ArrayBuffer(size);
@@ -27,6 +29,6 @@ export class Memory {
         }
 
         mainBufferView.set(sourceUint8Array, Number(addr));
-        console.log(`Memory.load: Loaded 0x${sourceUint8Array.byteLength.toString(16)} bytes to 0x${addr.toString(16)}`);
+        utils.log(`Memory.load: Loaded 0x${sourceUint8Array.byteLength.toString(16)} bytes to 0x${addr.toString(16)}`);
     }
 }

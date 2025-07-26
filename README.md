@@ -81,7 +81,7 @@ The CPU emulator supports:
 
 ## License
 
-This project is licensed under the ISC License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the AGPL-3.0-only License - see the [LICENSE](LICENSE) file for details.
 
 ## Contributing
 
