@@ -12,10 +12,10 @@ export class Memory {
     readBigUint64(addr) { return this.view.getBigUint64(addr, true); }
 
     // Write methods
-    writeUint8(addr, value) { return this.view.setUint8(addr, value); }
-    writeUint16(addr, value) { return this.view.setUint16(addr, value, true); } // true for little-endian
-    writeUint32(addr, value) { return this.view.setUint32(addr, value, true); }
-    writeBigUint64(addr, value) { return this.view.setBigUint64(addr, value, true); }
+    writeUint8(addr, value) { this.view.setUint8(addr, Number(value)); }
+    writeUint16(addr, value) { this.view.setUint16(addr, Number(value), true); } // true for little-endian
+    writeUint32(addr, value) { this.view.setUint32(addr, Number(value), true); }
+    writeBigUint64(addr, value) { this.view.setBigUint64(addr, value, true); }
 
     // Helper to load binary data into memory (eg. boot sector)
     load(addr, data) {

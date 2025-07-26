@@ -1,144 +1,126 @@
 "use strict";
 
-if (!(window?.config && window?.EmCPU)) throw new Error("Missing config or EmCPU");
-const { CPU, Memory, IOManager, log } = window.EmCPU;
+if (!window?.config || !window?.EmCPU) {
+    throw new Error("Missing config or EmCPU");
+}
 
+const { Debugger } = await import("./debugger.js");
+
+EmCPU.setMode("prod");
+// --- Boot Sector ---
 let bootsector;
-
-/**
- * Fetch the boot sector from the server and store it in the global variable 'bootsector'.
- *
- * This is a Promise that resolves once the boot sector has been loaded.
- *
- * The boot sector is an array of bytes, and is usually loaded from a file on the server.
- * It is stored in the 'bootsector' variable so that it can be accessed by other parts of
- * the code.
- */
 {
-    const response = await fetch("/out/boot.bin");
-    if (!response.ok) {
-        throw new EmError("Failed to load boot sector: " + response.statusText);
-    }
-    const buffer = await response.arrayBuffer();
-    bootsector = new Uint8Array(buffer);
+    const res = await fetch("/out/boot.bin");
+    if (!res.ok) throw new Error("Failed to fetch boot sector: " + res.statusText);
+    const buf = await res.arrayBuffer();
+    bootsector = new Uint8Array(buf);
 }
 
-const formatRegister = (value, bits = 64) => {
-    const bigVal = BigInt(value);
-    const mask = (1n << BigInt(bits)) - 1n;
-    const maskedValue = bigVal & mask;
-    const hexStr = maskedValue.toString(16).padStart(bits / 4, '0');
-    return `0x${hexStr}`;
-};
-
-function printFinalState(cpu) {
-    console.log("\nEmulation completed");
-    console.log("--- Final Register States ---");
-    console.log("Final AL:", formatRegister(cpu.readRegister('al', 1), 8));
-    console.log("Final RAX:", formatRegister(cpu.rax));
-    console.log("Final RBX:", formatRegister(cpu.rbx));
-    console.log("Final RCX:", formatRegister(cpu.rcx));
-    console.log("Final RDX:", formatRegister(cpu.rdx));
-    console.log("Final R8:", formatRegister(cpu.r8));
-    console.log("Final RDI:", formatRegister(cpu.rdi));
-
-    console.log("\n--- Final Control Registers ---");
-    console.log("Final CR0:", `0x${cpu.cr0.toString(16).padStart(16, '0')}`);
-    console.log("Final CR3:", `0x${cpu.cr3.toString(16).padStart(16, '0')}`);
-    console.log("Final CR4:", `0x${cpu.cr4.toString(16).padStart(16, '0')}`);
-    console.log("Final EFER:", `0x${cpu.efer.toString(16).padStart(16, '0')}`);
-
-    console.log("\n--- Final Flags ---");
-    console.log("Final Flags (CF, ZF, SF, OF):", cpu.flags);
-}
-
-const memory = new Memory(window.config.MEM_SIZE);
-const io = new IOManager();
-const cpu = new CPU(memory, io);
-
+// --- Initialize CPU, Memory, IO ---
+const memory = new EmCPU.Memory(window.config.MEM_SIZE);
+const io = new EmCPU.IOManager();
+const cpu = new EmCPU.CPU(memory, io);
 window.cpu = cpu;
 
-// --- Load Devices ---
+// --- Devices ---
 await import("./devices/COM1_Serial_Port.js");
 await import("./devices/PS_2_Keyboard_Controller.js");
+// await import("./devices/PIT_8254.js");
 
-// --- Setup Paging ---
-cpu.cr3 = CPU.setupIdentityPaging(memory, 0n, 0n, 0x200000n, 0x200000n);
-
-// --- Load Boot Sector ---
+// --- Paging + Bootsector ---
+cpu.cr3 = EmCPU.CPU.setupIdentityPaging(memory, 0n, 0n, 0x200000n, 0x200000n);
 memory.load(0x7C00, bootsector);
 cpu.rip = 0x7C00n;
 
-const scheduleNextTick = (() => {
-    if ('requestIdleCallback' in window) {
-        return (fn) => requestIdleCallback(fn, { timeout: 50 });
-    } else if (typeof MessageChannel !== "undefined") {
-        const channel = new MessageChannel();
-        const queue = [];
-        channel.port1.onmessage = () => queue.shift()?.();
-        return (fn) => {
-            queue.push(fn);
-            channel.port2.postMessage(null);
-        };
-    } else {
-        return (fn) => setTimeout(fn, 0);
-    }
-})();
+// --- Debugger ---
+const dbgr = new Debugger(cpu);
+if (
+    window.location.search.includes("debug") ||
+    window.localStorage && window.localStorage.getItem("debug") === "true" ||
+    window.sessionStorage && window.sessionStorage.getItem("debug") === "true" ||
+    window.location.hash.includes("debug")
+) dbgr.init(document.body);
 
-let stepsPerChunk = 200;
-let timeBudget = 5;
+// --- Utility: Dump Final CPU State ---
+function printFinalState(cpu) {
+    const hex = (val, bits = 64) => `0x${(BigInt(val) & ((1n << BigInt(bits)) - 1n)).toString(16).padStart(bits / 4, '0')}`;
+    console.log("\n--- Final State ---");
+    ["rax", "rbx", "rcx", "rdx", "rdi", "r8"].forEach(r => {
+        console.log(`${r.toUpperCase()}:`, hex(cpu[r]));
+    });
+    console.log("AL:", hex(cpu.readRegister('al', 1), 8));
+    console.log("CR0:", hex(cpu.cr0));
+    console.log("CR3:", hex(cpu.cr3));
+    console.log("CR4:", hex(cpu.cr4));
+    console.log("EFER:", hex(cpu.efer));
+    console.log("Flags:", cpu.flags);
+}
 
-function run() {
+// --- Main Emulation Loop ---
+let stepsPerChunk = 500;
+const timeBudget = 5; // ms
+let lastRender = performance.now();
+let lastMeasuredStepTime = 0;
+let lastMeasuredSteps = 0;
+
+async function run() {
     try {
-        const start = performance.now();
+        while (true) {
+            
+            const start = performance.now();
+            let steps = 0;
+            
+            while ((performance.now() - start) < timeBudget && steps < stepsPerChunk) {
+                await dbgr.tick(); // Wait for user to allow execution
+                if (!cpu.step()) {
+                    printFinalState(cpu); // HLT
+                    return;
+                }
 
-        let i = 0;
-        while (i++ < stepsPerChunk && performance.now() - start < timeBudget) {
-            if (!cpu.step()) {
-                printFinalState(cpu); // HLT
-                return;
+                if (cpu.rip >= BigInt(window.config.MEM_SIZE)) {
+                    console.error("RIP out of bounds");
+                    printFinalState(cpu);
+                    // dbgr.tick(); // Show final state
+                    return;
+                }
+
+                steps++;
             }
 
-            if (cpu.rip >= BigInt(window.config.MEM_SIZE)) {
-                console.error("Segmentation fault");
-                printFinalState(cpu);
-                return;
-            }
+            const elapsed = performance.now() - start;
+            lastMeasuredStepTime = elapsed;
+            lastMeasuredSteps = steps;
+
+            await new Promise(requestAnimationFrame); // yield to UI
         }
-
-        scheduleNextTick(run);
-    } catch (e) {
-        console.error("A fatal error occurred during emulation:", e);
+    } catch (err) {
+        console.error("Fatal error:", err);
         printFinalState(cpu);
+        // dbgr.tick(); // Show final state
     }
 }
 
-function tunePerformance() {
-    const t0 = performance.now();
-    for (let i = 0; i < stepsPerChunk; i++) cpu.step();
-    const elapsed = performance.now() - t0;
+// --- Autotune Performance ---
+let smoothing = 0.3;
+let avgElapsed = null;
 
-    if (elapsed < timeBudget - 1) {
-        stepsPerChunk += 50;
-    } else if (elapsed > timeBudget + 1) {
-        stepsPerChunk = Math.max(50, stepsPerChunk - 50);
+setInterval(() => {
+    if (lastMeasuredStepTime === 0) return;
+
+    if (avgElapsed === null) {
+        avgElapsed = lastMeasuredStepTime;
+    } else {
+        avgElapsed = smoothing * lastMeasuredStepTime + (1 - smoothing) * avgElapsed;
     }
 
-    log(`Steps per chunk: ${stepsPerChunk}, Time budget: ${timeBudget}`);
-}
+    if (avgElapsed < timeBudget - 1) {
+        stepsPerChunk += 100;
+    } else if (avgElapsed > timeBudget + 1) {
+        stepsPerChunk = Math.max(100, stepsPerChunk - 100);
+    }
 
-setInterval(tunePerformance, 1000);
+    // EmCPU.log(`AutoTuned stepsPerChunk = ${stepsPerChunk} (avg: ${avgElapsed.toFixed(2)}ms)`);
+}, 1000);
 
-let last = performance.now();
-document.body.appendChild(document.createElement("div")).id = "fps";
-function showFPS() {
-    const now = performance.now();
-    const fps = (1000 / (now - last)).toFixed(1);
-    last = now;
-    document.getElementById("fps").textContent = `FPS: ${fps}`;
-    requestAnimationFrame(showFPS);
-}
-showFPS();
-
-console.log("--- STARTING EMULATION ---")
+console.log("--- STARTING EMULATION ---");
 run();

@@ -1,5 +1,8 @@
 import terser from "@rollup/plugin-terser";
 
+/**
+ * @type {import('rollup').RollupOptions}
+ */
 export default {
     input: "cpu/index.js",
     output: {
@@ -9,6 +12,6 @@ export default {
         sourcemap: true,
     },
     plugins: [
-        terser(),
+        // terser(),
     ]
 };

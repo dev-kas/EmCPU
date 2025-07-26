@@ -1,34 +1,79 @@
-bits 64
+; =============================================
+;  Part 1: 16-bit Real Mode Entry Point
+; =============================================
+bits 16
 org 0x7C00
 
 _start:
-    mov rsp, 0x200000
+    ; NOTE: We are in 16-bit Real Mode here.
+    ; We cannot use 64-bit registers or addressing.
+    
+    ; The CPU starts in a state compatible with what we need.
+    ; Our emulator's setup of CR0, EFER, etc., happens here.
+    ; For a real machine, you'd set up a GDT first.
+    
+    ; The goal is to get into long mode as fast as possible.
+    ; Your JS code already sets up paging, GDT, IDT.
+    ; So, we just need to flip the bits in the registers.
+    
+    ; We need to use 32-bit instructions to write to CR0, etc.
+    ; We can do this with operand-size prefixes.
+    
+    ; Enable Long Mode in EFER
+    mov ecx, 0xC0000080 ; EFER MSR
+    mov eax, 0x101     ; LME=1, NXE=1
+    mov edx, 0
+    wrmsr
+
+    ; Enable Paging in CR0
+    mov eax, cr0
+    or eax, 0x80000001 ; PE=1, PG=1
+    mov cr0, eax
+    
+    ; Enable PAE in CR4
+    mov eax, cr4
+    or eax, 0x20       ; PAE=1
+    mov cr4, eax
+
+    ; Now, perform a far jump to our 64-bit code.
+    ; This jump will load CS with a 64-bit segment selector and
+    ; tell the CPU to start interpreting instructions as 64-bit.
+    ; 0x08 is the selector for our 64-bit code segment from the GDT.
+    jmp 0x08:long_mode_start
+
+; =============================================
+;  Part 2: 64-bit Long Mode Code
+; =============================================
+bits 64
+long_mode_start:
+    ; We are now officially in 64-bit Long Mode!
+    ; We can use 64-bit registers.
+    
+    ; Set up the stack
+    mov rsp, 0x90000
+    
+    ; Run the test (e.g., the keyboard echo test)
     mov rsi, prompt_message
-    call print ; Print the "Enter text:" prompt
+    call print
 
 .main_loop:
-    ; Wait for a key to be pressed
     .wait_for_key:
-        in al, 0x64     ; Read keyboard status port
-        test al, 1      ; Is bit 0 set (output buffer full)?
-        jz .wait_for_key ; If not, loop and wait again
-
-    ; A key is ready, read it
-    in al, 0x60         ; Read the key scancode (or ASCII in our case)
+        in al, 0x64
+        test al, 1
+        jz .wait_for_key
+    in al, 0x60
     
-    ; Echo the character back to the serial port
-    push rax            ; Save the character
+    push rax
     mov rsi, echo_prefix
     call print
-    pop rax             ; Restore the character
+    pop rax
     
-    mov rsi, temp_char  ; Point RSI to a temporary buffer
-    mov [rsi], al       ; Store the character there
-    call print          ; Print the single character
+    mov rsi, temp_char
+    mov [rsi], al
+    call print
+    jmp .main_loop
 
-    jmp .main_loop      ; Go back and wait for the next key
-
-; --- Reusable Print Function ---
+; --- Functions ---
 print:
     push rax
     push rdx
@@ -52,7 +97,7 @@ prompt_message:
 echo_prefix:
     db 0x0A, "You typed: ", 0
 temp_char:
-    db 0, 0 ; Buffer for a single character + null terminator
+    db 0, 0
 
 times 510-($-$$) db 0
 dw 0xAA55

@@ -20,6 +20,7 @@ export class CPU {
     static FLAG_CF_BIT = 0n;
     static FLAG_ZF_BIT = 6n;
     static FLAG_SF_BIT = 7n;
+    static FLAG_IF_BIT = 9n;
     static FLAG_OF_BIT = 11n;
 
     static EFER_LME = 1n << 8n; // Long Mode Enable
@@ -150,23 +151,37 @@ export class CPU {
             limit: 0
         }
 
+        // Interrupt Queue
+        this.interruptQueue = [];
+
         // General Purpose Registers
         this.rax = 0n; this.rbx = 0n; this.rcx = 0n; this.rdx = 0n;
         this.rsp = 0n; this.rbp = 0n; this.rsi = 0n; this.rdi = 0n;
         this.r8 = 0n; this.r9 = 0n; this.r10 = 0n; this.r11 = 0n;
         this.r12 = 0n; this.r13 = 0n; this.r14 = 0n; this.r15 = 0n;
 
+        // Segment Registers
+        this.cs = 0n;
+        this.ds = 0n;
+        this.ss = 0n;
+        this.es = 0n;
+        this.fs = 0n;
+        this.gs = 0n;
+
+        // RFLAGS Register
         this.rflags = 0n;
 
         // Instruction Pointer
         this.rip = 0n;
 
         // Flags
+        this.halted = false;
         this.flags = {
             cf: 0, // Carry Flag
             zf: 0, // Zero Flag
             sf: 0, // Sign Flag
             of: 0, // Overflow Flag
+            if: 1, // Interrupt Flag
             // TODO: Add more flags
         }
 
@@ -205,6 +220,8 @@ export class CPU {
             'r12b': 'r12', 'r13b': 'r13', 'r14b': 'r14', 'r15b': 'r15',
             // 64-bit flags register
             'rflags': 'rflags', 'eflags': 'rflags',
+            // Segment Registers
+            'cs': 'cs', 'ds': 'ds', 'es': 'es', 'ss': 'ss', 'fs': 'fs', 'gs': 'gs',
         };
     }
 
@@ -330,7 +347,8 @@ export class CPU {
 
     step() {
         let rexPrefix = 0;
-        let defaultOperandSize = 4; // Default 32 bit (unless REX.W or 0x66 override)
+        let defaultOperandSize; // Default bits are determined on current CPU mode (unless REX.W or 0x66 override)
+
         this.operandSizeOverride = false;
 
         let rex_w = 0;
@@ -339,6 +357,16 @@ export class CPU {
         let rex_b = 0;
 
         let currentRIPBeforeFetch = this.rip; // Store RIP to calculate instruction start accurately
+
+        if (this.flags.if && this.interruptQueue.length > 0) {
+            this.halted = false;
+            const interruptNumber = this.interruptQueue.shift();
+            this.triggerInterrupt(interruptNumber);
+        }
+
+        if (this.halted) {
+            return true;
+        }
 
         let opcode; // Declare opcode here, will be assigned inside prefix loop
 
@@ -368,18 +396,25 @@ export class CPU {
                 }
             }
 
-            // After consuming all prefixes, determine the final operand size
-            // REX.W (0x08 bit) indicates 64-bit operand size. It takes precedence over 0x66.
-            // If REX.W is NOT set, AND 0x66 is present, then it's 16-bit.
-            // Otherwise, it's 32-bit default for protected mode or 64-bit default for long mode.
-            if (rex_w !== 0) {
-                defaultOperandSize = 8;
-            } else if (this.operandSizeOverride) { // 0x66 present, but no REX.W
-                defaultOperandSize = 2; // Set to 16-bit
-            } 
-            // If no REX.W and no 0x66, defaultOperandSize remains 4 (32-bit default for protected mode).
-            // A truly comprehensive emulator would set defaultOperandSize = 8 if in long mode,
-            // but for now, rely on REX.W or 0x66 to set it explicitly from the instruction.
+            // Determine the final default operand size based on mode and prefixes.
+            if (this.mode === 'long') {
+                // In long mode, REX.W takes precedence for 64-bit.
+                if (rex_w) {
+                    defaultOperandSize = 8;
+                }
+                // 0x66 prefix forces 16-bit.
+                else if (this.operandSizeOverride) {
+                    defaultOperandSize = 2;
+                }
+                // Default for most instructions is 32-bit.
+                else {
+                    defaultOperandSize = 4;
+                }
+            } else { // Real or Protected Mode
+                // Default is 16-bit. A 0x66 prefix toggles it to 32-bit.
+                // TODO: Add CS.D bit logic for protected mode here later.
+                defaultOperandSize = this.operandSizeOverride ? 4 : 2;
+            }
 
             // 2-byte opcode prefix (0x0F) - This comes *after* other prefixes
             let twoByteOpcode = false;
@@ -395,6 +430,38 @@ export class CPU {
 
             // Priority 1: Handle two-byte opcodes (opcodes that follow 0x0F)
             if (twoByteOpcode) {
+                // MOV Reg, CRn (0x0F 20)
+                if (opcode === 0x20) {
+                    const modrm = this.readModRMByte();
+                    const crIdx = modrm.reg;
+                    const destRegFullIndex = modrm.rm + (rex_b << 3);
+
+                    // The operand size is determined by the effective operand size.
+                    // In long mode, a REX.W prefix makes it 64-bit. Otherwise, it's 32-bit.
+                    // In real/protected mode, it defaults to 16 or 32.
+                    let sizeBytes = defaultOperandSize;
+                    if (this.mode === 'long') {
+                        sizeBytes = rex_w ? 8 : 4;
+                    }
+
+                    const destRegName = this.getRegisterString(destRegFullIndex, sizeBytes, rexPrefix !== 0);
+
+                    let sourceValue;
+                    switch (crIdx) {
+                        case 0: sourceValue = this.cr0; break;
+                        case 2: sourceValue = this.cr2; break;
+                        case 3: sourceValue = this.cr3; break;
+                        case 4: sourceValue = this.cr4; break;
+                        default:
+                            throw new Error(`Attempted to read from unknown/unsupported CR${crIdx}`);
+                    }
+
+                    this.writeRegister(destRegName, sourceValue, sizeBytes);
+                    
+                    utils.log(`Decoded: MOV ${destRegName.toUpperCase()}, CR${crIdx}`);
+                    return true;
+                }
+
                 // MOV CRn, Reg/Mem64 (0x0F 22)
                 if (opcode === 0x22) {
                     const modrm = this.readModRMByte();
@@ -506,6 +573,31 @@ export class CPU {
 
             // Priority 2: Handle single-byte opcodes (only if not a two-byte opcode)
 
+            // ADD r/m8, reg8
+            if (opcode === 0x00) {
+                const modrm = this.readModRMByte();
+            
+                const regName = this.getRegisterString(modrm.reg, 1, false);
+                const regVal = this.readRegister(regName, 1) & 0xFFn;
+            
+                let destAddr;
+            
+                if (modrm.mod === 0 && modrm.rm === 0) {
+                    const bx = this.readRegister("bx", 2);
+                    const si = this.readRegister("si", 2);
+                    destAddr = Number((bx + si) & 0xFFFFn);
+                } else {
+                    throw new Error(`ADD: Mod/RM mode not yet implemented (mod=${modrm.mod}, rm=${modrm.rm})`);
+                }
+            
+                const memVal = BigInt(this.memory.readUint8(destAddr)) & 0xFFn;
+                const result = (memVal + regVal) & 0xFFn;
+            
+                this.memory.writeUint8(destAddr, Number(result));
+                utils.log(`Decoded: ADD [BX+SI], ${regName} (0x${regVal.toString(16)}) → Result: 0x${result.toString(16)}`);
+                return true;
+            }
+
             // NOP instruction
             if (opcode === 0x90) {
                 utils.log("Decoded: NOP");
@@ -514,8 +606,9 @@ export class CPU {
 
             // HLT instruction
             if (opcode === 0xF4) {
+                this.halted = true;
                 utils.log("HLT instruction encountered. Emulation halted.");
-                return false;
+                return true;
             }
 
             // Conditional Jumps (short form: Jcc rel8)
@@ -548,50 +641,26 @@ export class CPU {
 
             // Universal MOV reg, imm (0xB0 - 0xBF)
             if (opcode >= 0xB0 && opcode <= 0xBF) {
-                const destRegIdx = opcode & 0x07;
-                
-                let immValue;
+                const destRegIdx = (opcode & 0x07) + (rex_b << 3);
                 let sizeBytes;
-                let destRegName;
-
-                const getImmediateValue = (currentRip, numBytes) => {
-                    if ((this.cr0 & CPU.CR0_PE) !== 0n) { 
-                        if (numBytes === 1) return BigInt(this.readVirtualUint8(currentRip));
-                        else if (numBytes === 2) return BigInt(this.readVirtualUint16(currentRip)); 
-                        else if (numBytes === 4) return BigInt(this.readVirtualUint32(currentRip));
-                        else if (numBytes === 8) return this.readVirtualBigUint64(currentRip);
-                    } else {
-                        if (numBytes === 1) return BigInt(this.memory.readUint8(Number(currentRip)));
-                        else if (numBytes === 2) return BigInt(this.memory.readUint16(Number(currentRip))); 
-                        else if (numBytes === 4) return BigInt(this.memory.readUint32(Number(currentRip)));
-                        else if (numBytes === 8) return BigInt(this.memory.readBigUint64(Number(currentRip))); // Ensure BigInt
-                    }
-                    throw new Error(`Unsupported immediate size for MOV reg, imm: ${numBytes}`);
-                };
 
                 if (opcode >= 0xB0 && opcode <= 0xB7) { // 8-bit MOV (B0-B7)
-                    destRegName = this.getRegisterString(destRegIdx + (rex_b << 3), 1, rexPrefix !== 0); // Pass hasRexPrefix
                     sizeBytes = 1;
-                    immValue = getImmediateValue(this.rip, 1);
-                    this.rip += 1n;
                 } else { // 16/32/64-bit MOV (B8-BF)
-                    sizeBytes = defaultOperandSize; // Use the determined operand size
-                    destRegName = this.getRegisterString(destRegIdx + (rex_b << 3), sizeBytes, rexPrefix !== 0); // Pass hasRexPrefix
-                    if (sizeBytes === 2) { // 16-bit
-                        immValue = getImmediateValue(this.rip, 2);
-                        this.rip += 2n;
-                    } else if (sizeBytes === 4) { // 32-bit
-                        immValue = getImmediateValue(this.rip, 4);
-                        this.rip += 4n;
-                    } else if (sizeBytes === 8) { // 64-bit
-                        immValue = getImmediateValue(this.rip, 8);
-                        this.rip += 8n;
-                    } else {
-                        throw new Error(`Unsupported immediate size for MOV reg, imm (B8-BF variant) with sizeBytes: ${sizeBytes}`);
+                    // THIS IS THE CORRECTED LOGIC
+                    if (this.mode === 'long') {
+                        sizeBytes = rex_w ? 8 : (this.operandSizeOverride ? 2 : 4);
+                    } else { // Real or Protected mode
+                        // Default is 16-bit. 0x66 prefix makes it 32-bit.
+                        sizeBytes = this.operandSizeOverride ? 4 : 2;
                     }
                 }
+
+                const destRegName = this.getRegisterString(destRegIdx, sizeBytes, rexPrefix !== 0);
+                const immValue = this.readSignedImmediate(sizeBytes === 8 ? 8 : sizeBytes); // 64-bit imm is 64-bit
+                
                 this.writeRegister(destRegName, immValue, sizeBytes);
-                utils.log(`Decoded: MOV ${destRegName.toUpperCase()}, 0x${immValue.toString(16)}${sizeBytes === 8 ? 'n' : ''}`);
+                utils.log(`Decoded: MOV ${destRegName.toUpperCase()}, 0x${immValue.toString(16)}`);
                 return true;
             }
             
@@ -735,6 +804,38 @@ export class CPU {
                 const destOperandString = destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`;
                 const srcOperandString = (dBit === 0) ? regOpName.toUpperCase() : (rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`);
                 utils.log(`Decoded: OR ${destOperandString}, ${srcOperandString} (0x${destValue.toString(16)}n | 0x${sourceValue.toString(16)}n) -> Result: 0x${result.toString(16)}n`);
+                return true;
+            }
+
+            // OR AL/AX/EAX/RAX, imm (0x0C / 0x0D)
+            if (opcode === 0x0C || opcode === 0x0D) {
+                const wBit = opcode & 0x01;
+                
+                // USE the defaultOperandSize calculated at the top of step().
+                // This is the source of truth for the operation's size.
+                let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
+
+                const regName = this.getRegisterString(0, sizeBytes, rexPrefix !== 0); // Accumulator
+                const regValue = this.readRegister(regName, sizeBytes);
+
+                // The immediate value's size matches the operand size,
+                // except in 64-bit mode where it's a 32-bit immediate.
+                const immediateSize = (sizeBytes === 8) ? 4 : sizeBytes;
+                const immediateValue = this.readSignedImmediate(immediateSize);
+
+                const result = regValue | immediateValue;
+
+                // Flag Calculation
+                this.flags.of = 0;
+                this.flags.cf = 0;
+                const bitMask = (1n << BigInt(sizeBytes * 8)) - 1n;
+                this.flags.zf = (result & bitMask) === 0n ? 1 : 0;
+                const signBitMask = 1n << (BigInt(sizeBytes * 8) - 1n);
+                this.flags.sf = ((result & signBitMask) !== 0n) ? 1 : 0;
+                
+                this.writeRegister(regName, result, sizeBytes);
+
+                utils.log(`Decoded: OR ${regName.toUpperCase()}, 0x${immediateValue.toString(16)}`);
                 return true;
             }
 
@@ -1056,6 +1157,18 @@ export class CPU {
                         operation = 'add';
                         result = destValue + immediateValue;
                         break;
+                    case 1: // OR
+                        operation = 'or';
+                        result = destValue | immediateValue;
+                        break;
+                    case 2: // ADC
+                        operation = 'adc';
+                        result = destValue + immediateValue + this.flags.cf;
+                        break;
+                    case 3: // SBB
+                        operation = 'sbb';
+                        result = destValue - immediateValue - this.flags.cf;
+                        break;
                     case 4: // AND
                         operation = 'and';
                         result = destValue & immediateValue;
@@ -1064,22 +1177,34 @@ export class CPU {
                         operation = 'sub';
                         result = destValue - immediateValue;
                         break;
+                    case 6: // XOR
+                        operation = 'xor';
+                        result = destValue ^ immediateValue;
+                        break;
                     case 7: // CMP
                         operation = 'sub'; // CMP performs a subtraction for flags
                         result = destValue - immediateValue;
                         break;
-                    // TODO: add OR(/1), ADC(/2), SBB(/3), XOR(/6) here later
                     default:
                         throw new Error(`Unsupported Group 1 operation with /reg=${modrm.reg}`);
                 }
 
                 // Update flags based on the operation
-                if (operation === 'add' || operation === 'sub') {
-                    this.updateArithmeticFlags(result, destValue, immediateValue, sizeBytes, operation);
-                } else { // Logical op (AND)
+                if (operation === 'add' || operation === 'sub' || operation === 'adc' || operation === 'sbb') {
+                    // For ADC and SBB, the "second operand" is conceptually the immediate value PLUS the carry/borrow.
+                    const effectiveOperand2 = (operation === 'adc' || operation === 'sbb')
+                        ? immediateValue + BigInt(this.flags.cf)
+                        : immediateValue;
+                    
+                    // The operation for flags is always a simple add or sub.
+                    const flagOperation = (operation === 'add' || operation === 'adc') ? 'add' : 'sub';
+
+                    this.updateArithmeticFlags(result, destValue, effectiveOperand2, sizeBytes, flagOperation);
+                } else { // Logical ops (AND, OR, XOR)
                     this.flags.cf = 0;
                     this.flags.of = 0;
-                    this.flags.zf = (result === 0n) ? 1 : 0;
+                    const bitMask = (1n << BigInt(sizeBytes * 8)) - 1n;
+                    this.flags.zf = (result & bitMask) === 0n ? 1 : 0;
                     const signBitMask = 1n << (BigInt(sizeBytes * 8) - 1n);
                     this.flags.sf = ((result & signBitMask) !== 0n) ? 1 : 0;
                 }
@@ -1127,47 +1252,55 @@ export class CPU {
             if (opcode >= 0x88 && opcode <= 0x8B) {
                 const modrm = this.readModRMByte();
                 const dBit = (opcode >>> 1) & 0x01;
-                const wBit = opcode & 0x01;         
+                const wBit = opcode & 0x01;
 
                 let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
 
                 const regOpFullIndex = modrm.reg + (rex_r << 3);
-                const regOpName = this.getRegisterString(regOpFullIndex, sizeBytes, rexPrefix !== 0); // Pass hasRexPrefix
+                const regOpName = this.getRegisterString(regOpFullIndex, sizeBytes, rexPrefix !== 0);
+                const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rex_x, rexPrefix !== 0);
+                
+                const fullRegNameForVerify = this.registers[regOpName]; // Get the full 64-bit register name (e.g., 'rax' from 'ax')
 
-                const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_x, rex_b, rexPrefix !== 0); // Pass hasRexPrefixForNaming
+                console.info(`--- MOV [r/m],reg START (Opcode: 0x${opcode.toString(16)}) ---`);
+                console.info(`  dBit=${dBit}, sizeBytes=${sizeBytes}, regOp=${regOpName}, rmOperand.addr=0x${rmOperand.address?.toString(16)}`);
 
-                let sourceValue;
-                let destOperand; 
+                if (dBit === 0) { // Direction: r/m <- reg
+                    const sourceValue = this.readRegister(regOpName, sizeBytes);
+                    console.info(`  DIRECTION: r/m <- reg. Writing 0x${sourceValue.toString(16)} from ${regOpName}...`);
+                    
+                    if (rmOperand.type === 'reg') {
+                        this.writeRegister(rmOperand.name, sourceValue, sizeBytes);
+                    } else { // Memory Destination
+                        console.info(`  ...to MEMORY at 0x${rmOperand.address.toString(16)}`);
+                        if (sizeBytes === 1) this.writeVirtualUint8(rmOperand.address, sourceValue);
+                        else if (sizeBytes === 2) this.writeVirtualUint16(rmOperand.address, sourceValue);
+                        else if (sizeBytes === 4) this.writeVirtualUint32(rmOperand.address, sourceValue);
+                        else this.writeVirtualBigUint64(rmOperand.address, sourceValue);
+                    }
+                } else { // dBit === 1, Direction: reg <- r/m
+                    const destRegName = regOpName;
+                    let sourceValue;
+                    
+                    console.info(`  DIRECTION: reg <- r/m. Reading from r/m operand...`);
 
-                if (dBit === 0) { 
-                    sourceValue = this.readRegister(regOpName, sizeBytes); 
-                    destOperand = rmOperand; 
-                    utils.log(`  Action: R/M(DEST) <- Reg(SRC)`);
-                } else { 
                     if (rmOperand.type === 'reg') {
                         sourceValue = this.readRegister(rmOperand.name, sizeBytes);
-                    } else { 
-                        if (sizeBytes === 1) sourceValue = BigInt(this.readVirtualUint8(rmOperand.address));
-                        else if (sizeBytes === 2) sourceValue = BigInt(this.readVirtualUint16(rmOperand.address));
-                        else if (sizeBytes === 4) sourceValue = BigInt(this.readVirtualUint32(rmOperand.address));
-                        else if (sizeBytes === 8) sourceValue = this.readVirtualBigUint64(rmOperand.address);
-                        else throw new Error("Unsupported memory read size.");
+                    } else { // Memory Source
+                        sourceValue = sizeBytes === 1 ? BigInt(this.readVirtualUint8(rmOperand.address))
+                                    : sizeBytes === 2 ? BigInt(this.readVirtualUint16(rmOperand.address))
+                                    : sizeBytes === 4 ? BigInt(this.readVirtualUint32(rmOperand.address))
+                                    : this.readVirtualBigUint64(rmOperand.address);
                     }
-                    destOperand = { type: 'reg', name: regOpName }; 
-                    utils.log(`  Action: Reg(DEST) <- R/M(SRC)`);
-                }
+                    
+                    console.info(`  Read value 0x${sourceValue.toString(16)} from r/m. Writing to ${destRegName}.`);
+                    this.writeRegister(destRegName, sourceValue, sizeBytes);
 
-                if (destOperand.type === 'reg') {
-                    this.writeRegister(destOperand.name, sourceValue, sizeBytes);
-                } else { 
-                    if (sizeBytes === 1) this.writeVirtualUint8(destOperand.address, Number(sourceValue));
-                    else if (sizeBytes === 2) this.writeVirtualUint16(destOperand.address, Number(sourceValue));
-                    else if (sizeBytes === 4) this.writeVirtualUint32(destOperand.address, Number(sourceValue));
-                    else if (sizeBytes === 8) this.writeVirtualBigUint64(destOperand.address, sourceValue);
-                    else throw new Error("Unsupported memory write size.");
+                    // === THIS IS THE CRITICAL NEW LOG ===
+                    console.info(`  VERIFY: After writing to ${destRegName}, the full register ${fullRegNameForVerify} is now 0x${this[fullRegNameForVerify].toString(16)}`);
+                    // ===================================
                 }
-
-                utils.log(`Decoded: MOV ${destOperand.type === 'reg' ? destOperand.name.toUpperCase() : `[0x${destOperand.address.toString(16)}]`}, 0x${sourceValue.toString(16)}${sizeBytes === 8 ? 'n' : ''}`);
+                console.info(`--- MOV [r/m],reg END ---`);
                 return true;
             }
 
@@ -1243,6 +1376,33 @@ export class CPU {
                 }
             
                 utils.log(`Decoded: MOV byte ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`}, 0x${immValue.toString(16)}`);
+                return true;
+            }
+
+            // MOV SR, r/m16 (0x8E /r)
+            if (opcode === 0x8E) {
+                const modrm = this.readModRMByte();
+            
+                const segmentRegs = ['es', 'cs', 'ss', 'ds', 'fs', 'gs'];
+                const sregName = segmentRegs[modrm.reg];
+            
+                if (!sregName) {
+                    throw new Error(`Invalid segment register index: ${modrm.reg}`);
+                }
+            
+                const rmOperand = this.resolveModRMOperand(modrm, 2, rex_r, rex_b, rexPrefix !== 0);
+            
+                let value;
+                if (rmOperand.type === 'reg') {
+                    value = Number(this.readRegister(rmOperand.name, 2)); // value is 16-bit number
+                } else {
+                    value = this.readVirtualUint16(rmOperand.address);
+                }
+            
+                // Write value into the segment register (16-bit)
+                this.writeRegister(sregName, BigInt(value), 2);
+            
+                utils.log(`Decoded: MOV ${sregName.toUpperCase()}, ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`} (0x${value.toString(16)})`);
                 return true;
             }
 
@@ -1615,26 +1775,28 @@ export class CPU {
 
             // IRETQ (0xCF)
             if (opcode === 0xCF) {
-                // For a return from a Page Fault (#14), an error code was pushed
-                // after RIP/CS/RFLAGS. We need to pop and discard it.
-                // A more advanced handler would handle interrupts that *don't*
-                // push an error code, but for this test, this is correct.
-                this.rsp += 8n; // Discard the error code from the stack
-
-                // Pop RIP
-                this.rip = this.readVirtualBigUint64(this.rsp);
+                // Pop the interrupt number we pushed
+                const interruptNumber = Number(this.readVirtualBigUint64(this.rsp));
                 this.rsp += 8n;
 
-                // Pop CS - we don't use it yet, but we must advance the stack
+                // Page Faults (#8, #10-14, #17) push an error code.
+                const hasErrorCode = [8, 10, 11, 12, 13, 14, 17].includes(interruptNumber);
+                if (hasErrorCode) {
+                    this.rsp += 8n; // Discard the error code
+                }
+
+                // Now pop the standard frame
+                this.rip = this.readVirtualBigUint64(this.rsp);
+                this.rsp += 8n;
+                
                 const new_cs = this.readVirtualBigUint64(this.rsp);
                 this.rsp += 8n;
                 
-                // Pop RFLAGS and update the flags object
                 const new_rflags = this.readVirtualBigUint64(this.rsp);
                 this.disassembleRFlags(new_rflags);
                 this.rsp += 8n;
                 
-                utils.log(`Decoded: IRETQ (Returning to 0x${this.rip.toString(16)}, restoring flags)`);
+                utils.log(`Decoded: IRETQ from INT #${interruptNumber} (Returning to 0x${this.rip.toString(16)})`);
                 return true;
             }
 
@@ -1698,6 +1860,99 @@ export class CPU {
                 return true;
             }
 
+            // INC r/m (0xFE /0 for byte, 0xFF /0 for word/dword/qword)
+            if (opcode === 0xFE || opcode === 0xFF) {
+                const modrm = this.readModRMByte();
+                
+                // This instruction is selected when the /reg field of the ModR/M byte is 0.
+                if (modrm.reg === 0) {
+                    const wBit = opcode & 0x01;
+                    // Opcode 0xFE is always 1 byte.
+                    // Opcode 0xFF uses defaultOperandSize (word, dword, or qword).
+                    let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
+
+                    const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rex_x, rexPrefix !== 0);
+                    
+                    let value;
+                    // Read the current value from the register or memory
+                    if (rmOperand.type === 'reg') {
+                        value = this.readRegister(rmOperand.name, sizeBytes);
+                    } else {
+                        if (sizeBytes === 1) value = BigInt(this.readVirtualUint8(rmOperand.address));
+                        else if (sizeBytes === 2) value = BigInt(this.readVirtualUint16(rmOperand.address));
+                        else if (sizeBytes === 4) value = BigInt(this.readVirtualUint32(rmOperand.address));
+                        else value = this.readVirtualBigUint64(rmOperand.address);
+                    }
+
+                    const result = value + 1n;
+
+                    // --- Correct Flag Calculation for INC ---
+                    // IMPORTANT: INC does NOT affect the Carry Flag (CF).
+                    // It affects OF, SF, ZF, AF, PF.
+                    const originalCF = this.flags.cf; // Preserve the original Carry Flag
+
+                    // We can use our existing function, but for a fake 'add' of 1
+                    this.updateArithmeticFlags(result, value, 1n, sizeBytes, 'add');
+
+                    this.flags.cf = originalCF; // Restore the Carry Flag
+                    // --- End Flag Calculation ---
+                    
+                    // Write the result back
+                    if (rmOperand.type === 'reg') {
+                        this.writeRegister(rmOperand.name, result, sizeBytes);
+                    } else {
+                        if (sizeBytes === 1) this.writeVirtualUint8(rmOperand.address, Number(result));
+                        else if (sizeBytes === 2) this.writeVirtualUint16(rmOperand.address, Number(result));
+                        else if (sizeBytes === 4) this.writeVirtualUint32(rmOperand.address, Number(result));
+                        else this.writeVirtualBigUint64(rmOperand.address, result);
+                    }
+                    
+                    const operandStr = rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`;
+                    utils.log(`Decoded: INC ${operandStr}`);
+                    return true;
+                }
+            }
+
+            // STI (Set Interrupt Flag)
+            if (opcode === 0xFB) {
+                this.flags.if = 1;
+                utils.log("Decoded: STI");
+                return true;
+            }
+
+            // CLI (Clear Interrupt Flag)
+            if (opcode === 0xFA) {
+                this.flags.if = 0;
+                utils.log("Decoded: CLI");
+                return true;
+            }
+
+            // JMP ptr16:16 (Far Jump) - Opcode 0xEA
+            if (opcode === 0xEA) {
+                // This instruction is special. In the 16-bit boot stub, the assembler
+                // always generates a 16-bit offset and a 16-bit selector.
+                // We will hardcode the handler to read these sizes to match the
+                // machine code, ignoring defaultOperandSize for this specific opcode.
+                
+                // We must use physical reads because paging is not yet effective
+                // for the instruction stream itself.
+                const offset = this.memory.readUint16(Number(this.rip));
+                this.rip += 2n;
+
+                const new_cs = this.memory.readUint16(Number(this.rip));
+                this.rip += 2n;
+
+                // Set the new segment and instruction pointer
+                this.cs = BigInt(new_cs);
+                this.rip = BigInt(offset);
+                
+                // Re-evaluating the CPU mode here is good practice after loading CS.
+                this.updateCPUMode();
+                
+                utils.log(`Decoded: JMP far 0x${new_cs.toString(16)}:0x${offset.toString(16)}`);
+                return true;
+            }
+
             // If an instruction falls through all specific handlers, it's truly unknown
             utils.log(`Unknown opcode: 0x${(twoByteOpcode ? '0F ' : '')}${opcode.toString(16)} at 0x${currentRIPBeforeFetch.toString(16)}`); // Use currentRIPBeforeFetch for unknown opcodes
             return false;
@@ -1726,6 +1981,20 @@ export class CPU {
         }
         this.rip++;
         return byte;
+    }
+
+    readInstructionUint16() {
+        const lo = this.readInstructionByte();
+        const hi = this.readInstructionByte();
+        return (hi << 8) | lo;
+    }
+
+    readInstructionUint32() {
+        const b1 = this.readInstructionByte();
+        const b2 = this.readInstructionByte();
+        const b3 = this.readInstructionByte();
+        const b4 = this.readInstructionByte();
+        return (b4 << 24) | (b3 << 16) | (b2 << 8) | b1;
     }
 
     readModRMByte() {
@@ -1774,49 +2043,26 @@ export class CPU {
     }
 
     readSignedImmediate(sizeBytes) {
-        let value;
-        let rawValue; 
-        
-        // Use readVirtualUintX if Protected Mode is enabled, otherwise use physical
-        const getRawValue = (currentRip, numBytes) => {
-            if ((this.cr0 & CPU.CR0_PE) !== 0n) { // If Protected Mode is enabled
-                if (numBytes === 1) return this.readVirtualUint8(currentRip);
-                else if (numBytes === 2) return this.readVirtualUint16(currentRip);
-                else if (numBytes === 4) return this.readVirtualUint32(currentRip);
-                else if (numBytes === 8) return this.readVirtualBigUint64(currentRip); 
-            } else { // Real Mode
-                if (numBytes === 1) return this.memory.readUint8(Number(currentRip));
-                else if (numBytes === 2) return this.memory.readUint16(Number(currentRip));
-                else if (numBytes === 4) return this.memory.readUint32(Number(currentRip));
-                else if (numBytes === 8) return this.memory.readBigUint64(Number(currentRip)); 
-            }
-            throw new Error(`Unsupported size for raw signed immediate read: ${numBytes}`);
-        };
-
-
+        let rawValue;
         if (sizeBytes === 1) {
-            rawValue = getRawValue(this.rip, 1);
-            this.rip += 1n;
-            value = rawValue;
-            if (value & 0x80) value = value - 0x100; 
-        } else if (sizeBytes === 2) {
-            rawValue = getRawValue(this.rip, 2);
-            this.rip += 2n;
-            value = rawValue;
-            if (value & 0x8000) value = value - 0x10000; 
-        } else if (sizeBytes === 4) {
-            rawValue = getRawValue(this.rip, 4);
-            this.rip += 4n;
-            value = rawValue;
-            if (value & 0x80000000) value = value - 0x100000000; 
-        } else if (sizeBytes === 8) { 
-            rawValue = getRawValue(this.rip, 8);
-            this.rip += 8n;
-            return rawValue; 
-        } else {
-            throw new Error(`Invalid immediate size for signed read: ${sizeBytes}`); 
+            rawValue = this.readInstructionByte();
+            if (rawValue & 0x80) return BigInt(rawValue - 0x100);
+            return BigInt(rawValue);
         }
-        return BigInt(value); 
+        if (sizeBytes === 2) {
+            rawValue = this.readInstructionUint16();
+            if (rawValue & 0x8000) return BigInt(rawValue - 0x10000);
+            return BigInt(rawValue);
+        }
+        if (sizeBytes === 4) {
+            rawValue = this.readInstructionUint32();
+            if (rawValue & 0x80000000) return BigInt(rawValue - 0x100000000);
+            return BigInt(rawValue);
+        }
+        // For 64-bit, we need a 64-bit reader
+        const lo = this.readInstructionUint32();
+        const hi = this.readInstructionUint32();
+        return (BigInt(hi) << 32n) | BigInt(lo);
     }
 
     readSIBByte(mod) {
@@ -2104,6 +2350,12 @@ export class CPU {
             throw new PageFaultException(`PTE not present`, 0n);
         }
 
+        if (accessType === 'write' && (pte & CPU.PTE_READ_WRITE) === 0n) {
+            // The page is present but read-only. This is a page fault.
+            // The error code for a protection violation has bit 0 set.
+            throw new PageFaultException(`Protection Violation on write to VA 0x${virtualAddr.toString(16)}`, 1n);
+        }
+
         const pageBaseAddr = pte & ~0xFFFn; 
         const offset = virtualAddr & 0xFFFn; 
         const physical = pageBaseAddr | offset;
@@ -2118,6 +2370,11 @@ export class CPU {
         utils.log(`--- INTERRUPT TRIGGERED: #${interruptNumber} ---`);
 
         const descriptorAddr = this.idtr.base + BigInt(interruptNumber * 16);
+
+        console.log(`  IDTR.base = 0x${this.idtr.base.toString(16)}`);
+        console.log(`  Interrupt #${interruptNumber} @ 0x${descriptorAddr.toString(16)}`);
+        console.log(`  Raw bytes: ${[...new Uint8Array(this.memory.buffer.slice(Number(descriptorAddr), Number(descriptorAddr + 16n)))]
+            .map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
 
         const lowSlice = this.readVirtualBigUint64(descriptorAddr);
         const highSlice = this.readVirtualBigUint64(descriptorAddr + 8n);
@@ -2151,7 +2408,14 @@ export class CPU {
             this.rsp -= 8n;
             this.writeVirtualBigUint64(this.rsp, errorCode);
         }
-        
+        this.rsp -= 8n;
+        this.writeVirtualBigUint64(this.rsp, BigInt(interruptNumber));
+
+        console.log(`DEBUG: Parsed handlerAddr = 0x${handlerAddr.toString(16)}`);
+        console.log(`  offset_15_0  = 0x${offset_15_0.toString(16)}`);
+        console.log(`  offset_31_16 = 0x${offset_31_16.toString(16)}`);
+        console.log(`  offset_63_32 = 0x${offset_63_32.toString(16)}`);
+
         // Jump to the handler
         this.rip = handlerAddr;
         
@@ -2164,6 +2428,7 @@ export class CPU {
         if (this.flags.zf) flags |= (1n << CPU.FLAG_ZF_BIT);
         if (this.flags.sf) flags |= (1n << CPU.FLAG_SF_BIT);
         if (this.flags.of) flags |= (1n << CPU.FLAG_OF_BIT);
+        if (this.flags.if) flags |= (1n << CPU.FLAG_IF_BIT);
         // Always set bit 1 to 1, as per specification
         flags |= (1n << 1n);
         return flags;
@@ -2174,5 +2439,13 @@ export class CPU {
         this.flags.zf = ((rflagsValue >> CPU.FLAG_ZF_BIT) & 1n) === 1n ? 1 : 0;
         this.flags.sf = ((rflagsValue >> CPU.FLAG_SF_BIT) & 1n) === 1n ? 1 : 0;
         this.flags.of = ((rflagsValue >> CPU.FLAG_OF_BIT) & 1n) === 1n ? 1 : 0;
+        this.flags.if = ((rflagsValue >> CPU.FLAG_IF_BIT) & 1n) === 1n ? 1 : 0;
+    }
+
+    raiseInterrupt(interruptNumber) {
+        // In a real system, this would go through an Interrupt Controller (PIC).
+        // For now, we'll just queue it. We need a queue in case an interrupt
+        // happens while the CPU has interrupts disabled.
+        this.interruptQueue.push(interruptNumber);
     }
 }
