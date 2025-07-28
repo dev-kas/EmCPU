@@ -26,6 +26,7 @@ window.cpu = cpu;
 await import("./devices/COM1_Serial_Port.js");
 await import("./devices/PS_2_Keyboard_Controller.js");
 // await import("./devices/PIT_8254.js");
+await import("./devices/VGA_Text_Mode.js");
 
 // --- Paging + Bootsector ---
 cpu.cr3 = EmCPU.CPU.setupIdentityPaging(memory, 0n, 0n, 0x200000n, 0x200000n);
@@ -39,7 +40,10 @@ if (
     window.localStorage && window.localStorage.getItem("debug") === "true" ||
     window.sessionStorage && window.sessionStorage.getItem("debug") === "true" ||
     window.location.hash.includes("debug")
-) dbgr.init(document.body);
+) {
+    dbgr.init(document.body);
+    EmCPU.setMode("dev");
+};
 
 // --- Utility: Dump Final CPU State ---
 function printFinalState(cpu) {

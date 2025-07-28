@@ -16,6 +16,9 @@ export class Debugger {
         this.stateText = null;
         this.ripText = null;
 
+        this._memViewOffset = 0x7c00;
+        this.memViewSize = 512;
+
         this._state = "stopped";
 
         this.prevRegisters = {};
@@ -24,6 +27,9 @@ export class Debugger {
 
         this.brkPoints = new Set();
     }
+
+    get memViewOffset() { return this._memViewOffset }
+    set memViewOffset(value) { this._memViewOffset = Math.max(0, Math.min(value, this.cpu.memory.buffer.byteLength - this.memViewSize)) }
 
     get state() {
         return this._state;
@@ -102,10 +108,78 @@ export class Debugger {
         // Memory View
         const memoryContainer = document.createElement("div");
         memoryContainer.style.cssText = "display: flex; flex-direction: column; margin-top: 10px;";
+        const memTitleBar = document.createElement("div");
+        memTitleBar.style.cssText = "display: flex; flex-direction: row; gap: 5px; align-items: center;";
         const memTitle = document.createElement("span");
         memTitle.textContent = "Memory";
         memTitle.style.cssText = "font-size: 14px; font-weight: bold;";
-        memoryContainer.appendChild(memTitle);
+        memTitleBar.appendChild(memTitle);
+        const memOffsetDec = document.createElement("button");
+        memOffsetDec.textContent = "<";
+        memOffsetDec.style.cssText = "background-color: #444; color: white; border: 1px solid #666; padding: 2px 5px; cursor: pointer;";
+        memOffsetDec.onclick = () => {
+            this.memViewOffset -= this.memViewSize;
+            this.renderMemory(this.memViewOffset, this.memViewSize);
+            memOffsetInput.value = this.memViewOffset.toString(16).toUpperCase();
+        };
+        memTitleBar.appendChild(memOffsetDec);
+        const memOffsetInput = document.createElement("input");
+        memOffsetInput.value = this.memViewOffset.toString(16).toUpperCase();
+        memOffsetInput.style.cssText = "background-color: #444; color: white; border: 1px solid #666; padding: 2px 5px; cursor: text;";
+        memOffsetInput.oninput = () => {
+            this.memViewOffset = parseInt(memOffsetInput.value, 16);
+            this.renderMemory(this.memViewOffset, this.memViewSize);
+        };
+        memOffsetInput.onchange = () => {
+            let expr = memOffsetInput.value.trim();
+            let offset = 0;
+
+            try {
+                expr = expr.replace(/\b[0-9a-fA-F]+\b/g, match => parseInt(match, 16));
+                offset = Function(`"use strict"; return ([${expr}])`)()[0];
+                memOffsetInput.value = offset.toString(16).toUpperCase();
+            } catch (e) {
+                offset = parseInt(memOffsetInput.value, 16);
+            }
+
+            this.memViewOffset = offset;
+            this.renderMemory(this.memViewOffset, this.memViewSize);
+            memOffsetInput.value = this.memViewOffset.toString(16).toUpperCase();
+        }
+        memOffsetInput.onkeydown = (e) => {
+            switch (e.key) {
+                case "ArrowUp":
+                    this.memViewOffset += Math.max(1, e.shiftKey * 16);
+                    this.renderMemory(this.memViewOffset, this.memViewSize);
+                    memOffsetInput.value = this.memViewOffset.toString(16).toUpperCase();
+                    break;
+                case "ArrowDown":
+                    this.memViewOffset -= Math.max(1, e.shiftKey * 16);
+                    this.renderMemory(this.memViewOffset, this.memViewSize);
+                    memOffsetInput.value = this.memViewOffset.toString(16).toUpperCase();
+                    break;
+            }
+        }
+        memTitleBar.appendChild(memOffsetInput);
+        const memOffsetInc = document.createElement("button");
+        memOffsetInc.textContent = ">";
+        memOffsetInc.style.cssText = "background-color: #444; color: white; border: 1px solid #666; padding: 2px 5px; cursor: pointer;";
+        memOffsetInc.onclick = () => {
+            this.memViewOffset += this.memViewSize;
+            this.renderMemory(this.memViewOffset, this.memViewSize);
+            memOffsetInput.value = this.memViewOffset.toString(16).toUpperCase();
+        };
+        memTitleBar.appendChild(memOffsetInc);
+        const memOffsetJTR = document.createElement("button");
+        memOffsetJTR.textContent = String.fromCodePoint(0x2609);
+        memOffsetJTR.style.cssText = "background-color: #444; color: white; border: 1px solid #666; padding: 2px 5px; cursor: pointer;";
+        memOffsetJTR.onclick = () => {
+            this.memViewOffset = Number(this.cpu.rip ?? 0);
+            this.renderMemory(this.memViewOffset, this.memViewSize);
+            memOffsetInput.value = this.memViewOffset.toString(16).toUpperCase();
+        };
+        memTitleBar.appendChild(memOffsetJTR);
+        memoryContainer.appendChild(memTitleBar);
         this.memView = document.createElement("div");
         this.memView.style.cssText = `
             display: flex;
@@ -161,8 +235,57 @@ export class Debugger {
         }, { passive: false });
 
         // Control View
-        const controls = document.createElement("div");
-        controls.style.cssText = `
+        const controlsView = document.createElement("div");
+        controlsView.style.cssText = "display: flex; flex-direction: column; margin-top: 10px;";
+
+        const ctrlsViewREPLContainer = document.createElement("div");
+        ctrlsViewREPLContainer.style.cssText = "display: flex; flex-direction: row; gap: 5px; margin-top: 10px;";
+        const ctrlsViewREPLInput = document.createElement("input");
+        ctrlsViewREPLInput.style.cssText = "background-color: #444; color: white; border: 1px solid #666; padding: 5px 10px; cursor: text; width: 100%;";
+        ctrlsViewREPLInput.placeholder = "Enter a command...";
+        const ctrlsViewREPLInputHistory = [];
+        let ctrlsViewREPLInputHistoryIndex = 0;
+        ctrlsViewREPLInput.addEventListener("keydown", (e) => {
+            switch (e.key) {
+                case "Enter":
+                    ctrlsViewREPLInputHistory.push(ctrlsViewREPLInput.value);
+                    this.runREPLCommand(ctrlsViewREPLInput.value);
+                    ctrlsViewREPLInput.value = "";
+                    ctrlsViewREPLInputHistoryIndex = ctrlsViewREPLInputHistory.length;
+                    break;
+                case "ArrowUp":
+                    if (ctrlsViewREPLInputHistoryIndex > 0) {
+                        ctrlsViewREPLInput.value = ctrlsViewREPLInputHistory[--ctrlsViewREPLInputHistoryIndex] || "";
+                    }
+                    break;
+                case "ArrowDown":
+                    if (ctrlsViewREPLInputHistoryIndex < ctrlsViewREPLInputHistory.length) {
+                        ctrlsViewREPLInput.value = ctrlsViewREPLInputHistory[++ctrlsViewREPLInputHistoryIndex] || "";
+                    }
+                    break;
+            }
+        });
+        ctrlsViewREPLContainer.appendChild(ctrlsViewREPLInput);
+        const ctrlsViewREPLBtn = document.createElement("button");
+        ctrlsViewREPLBtn.textContent = String.fromCodePoint(0x25B6);
+        ctrlsViewREPLBtn.style.cssText = `
+            background-color: #444;
+            color: white;
+            border: 1px solid #666;
+            padding: 5px 10px;
+            cursor: pointer;
+        `;
+        ctrlsViewREPLBtn.onclick = () => {
+            ctrlsViewREPLInputHistory.push(ctrlsViewREPLInput.value);
+            this.runREPLCommand(ctrlsViewREPLInput.value)
+            ctrlsViewREPLInput.value = "";
+            ctrlsViewREPLInputHistoryIndex = ctrlsViewREPLInputHistory.length;
+        };
+        ctrlsViewREPLContainer.appendChild(ctrlsViewREPLBtn);
+        controlsView.appendChild(ctrlsViewREPLContainer);
+
+        const ctrlsViewMainRow = document.createElement("div");
+        ctrlsViewMainRow.style.cssText = `
             display: flex;
             flex-direction: row;
             gap: 5px;
@@ -171,7 +294,7 @@ export class Debugger {
 
         const leftArea = document.createElement("div");
         leftArea.style.cssText = "display: flex; flex-direction: row; gap: 5px; width: 100%; align-items: center; justify-content: flex-start;";
-        controls.appendChild(leftArea);
+        ctrlsViewMainRow.appendChild(leftArea);
 
         const ripText = document.createElement("span");
         ripText.textContent = "RIP: ";
@@ -195,7 +318,7 @@ export class Debugger {
 
         const rightArea = document.createElement("div");
         rightArea.style.cssText = "display: flex; flex-direction: row; gap: 5px; width: 100%; align-items: center; justify-content: flex-end;";
-        controls.appendChild(rightArea);
+        ctrlsViewMainRow.appendChild(rightArea);
 
         const stepBtn = document.createElement("button");
         stepBtn.textContent = "Step";
@@ -233,7 +356,8 @@ export class Debugger {
         stopBtn.onclick = () => this.state = "stopped";
         rightArea.appendChild(stopBtn);
 
-        elem.appendChild(controls);
+        controlsView.appendChild(ctrlsViewMainRow);
+        elem.appendChild(controlsView);
 
         parent.appendChild(elem);
         this.elem = elem;
@@ -484,11 +608,56 @@ export class Debugger {
         }
     }
 
+    runREPLCommand(command) {
+        const proxy = new Proxy({}, {
+            has: () => true,
+            get: (_, key) => (key in this.cpu ? this.cpu[key] : undefined),
+            set: (_, key, val) => {
+            if (key in this.cpu) this.cpu[key] = val;
+            return true;
+            }
+        });
+        
+        try {
+            const scopedFn = new Function("with(this) { return [" + command + "]; }");
+            const result = scopedFn.call(proxy)[0];
+            switch (typeof result) {
+                case "undefined":
+                    this.loggerHook("undefined");
+                    break;
+                case "object":
+                    if (result === null) {
+                        this.loggerHook("null");
+                    } else {
+                        this.loggerHook(JSON.stringify(result));
+                    }
+                    break;
+                case "string":
+                    this.loggerHook(result);
+                    break;
+                case "number":
+                    this.loggerHook(`${result} (0x${result.toString(16)})`);
+                    break;
+                case "bigint":
+                    this.loggerHook(`${result}n (0x${result.toString(16)}n)`);
+                    break;
+                case "boolean":
+                    this.loggerHook(result ? "true" : "false");
+                    break;
+                default:
+                    this.loggerHook(result);
+                    break;
+            }
+        } catch (e) {
+            this.loggerHook("REPL error:", e.message);
+        }
+    }
+
     async tick() {
         if (!this.didInit) return;
         this.renderRegisters();
         this.renderFlags();
-        this.renderMemory(0x7c00, 512);
+        this.renderMemory(this.memViewOffset, this.memViewSize);
 
         this.ripText.textContent = `0x${this.cpu.rip.toString(16).padStart(8, '0')}`;
         this.modeText.textContent = this.cpu.mode;

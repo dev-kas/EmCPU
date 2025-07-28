@@ -1,4 +1,4 @@
-import * as utils from "./utils";
+import * as utils from "./utils.js";
 import { Memory } from "./memory.js";
 import { IOManager } from "./io.js";
 
@@ -350,6 +350,7 @@ export class CPU {
         let defaultOperandSize; // Default bits are determined on current CPU mode (unless REX.W or 0x66 override)
 
         this.operandSizeOverride = false;
+        this.addressSizeOverride = false;
 
         let rex_w = 0;
         let rex_r = 0;
@@ -380,6 +381,9 @@ export class CPU {
                 if (byte === 0x66) { // Operand Size Override Prefix
                     this.operandSizeOverride = true;
                     byte = this.readInstructionByte(); // Consume 0x66, read next byte
+                } else if (byte === 0x67) { // Address Size Override Prefix
+                    this.addressSizeOverride = true;
+                    byte = this.readInstructionByte(); // Consume 0x67, read next byte
                 } else if ((byte & 0xF0) === 0x40) { // REX prefix: 0x40 - 0x4F
                     rexPrefix = byte;
                     rex_w = (rexPrefix & 0x08) >>> 3;
@@ -410,10 +414,13 @@ export class CPU {
                 else {
                     defaultOperandSize = 4;
                 }
-            } else { // Real or Protected Mode
+            } else if (this.mode === 'real') {
+                // In Real Mode, default is 16. 0x66 toggles to 32.
+                defaultOperandSize = this.operandSizeOverride ? 4 : 2;
+            } else { // Protected Mode
                 // Default is 16-bit. A 0x66 prefix toggles it to 32-bit.
                 // TODO: Add CS.D bit logic for protected mode here later.
-                defaultOperandSize = this.operandSizeOverride ? 4 : 2;
+                defaultOperandSize = this.operandSizeOverride ? 2 : 4;
             }
 
             // 2-byte opcode prefix (0x0F) - This comes *after* other prefixes
@@ -500,6 +507,31 @@ export class CPU {
                     }
                     return true;
                 }
+                // RDMSR (0x0F 32)
+                if (opcode === 0x32) {
+                    // The MSR to read is specified by the ECX register.
+                    const msrAddr = this.readRegister('ecx', 4); // In 32-bit mode, it's ECX
+
+                    let valueToRead = 0n; // Default to 0 for unknown MSRs
+
+                    // Check which MSR is being requested
+                    if (msrAddr === 0xC0000080n) { // EFER MSR
+                        valueToRead = this.efer;
+                    } else {
+                        console.warn(`RDMSR from unknown MSR 0x${msrAddr.toString(16)}`);
+                    }
+
+                    // The 64-bit result is placed in EDX:EAX
+                    const low32 = valueToRead & 0xFFFFFFFFn;
+                    const high32 = valueToRead >> 32n;
+
+                    // A 32-bit write to EAX/EDX will correctly zero the upper bits of RAX/RDX.
+                    this.writeRegister('eax', low32, 4);
+                    this.writeRegister('edx', high32, 4);
+                    
+                    utils.log(`Decoded: RDMSR (Read 0x${valueToRead.toString(16)} from MSR 0x${msrAddr.toString(16)} into EDX:EAX)`);
+                    return true;
+                }
                 // JE/JZ (0x0F 84) - near jump with 32-bit displacement
                 if (opcode === 0x84) {
                     const displacement = this.readSignedImmediate(4); // Read 32-bit signed displacement
@@ -522,6 +554,45 @@ export class CPU {
                     } else {
                         utils.log(`  Condition Not Met (ZF=1). Not jumping.`);
                     }
+                    return true;
+                }
+                // MOVZX Gv, Eb/Ew (0F B6 / 0F B7)
+                if (opcode === 0xB6 || opcode === 0xB7) {
+                    const modrm = this.readModRMByte();
+                    
+                    // Determine the size of the source operand from the opcode.
+                    // 0xB6 -> byte source, 0xB7 -> word source.
+                    const srcSizeBytes = (opcode === 0xB6) ? 1 : 2;
+
+                    // The destination size is the default operand size for the mode.
+                    let destSizeBytes = defaultOperandSize;
+                    // MOVZX to a 16-bit register is not valid in 64-bit mode without a 0x66 prefix.
+                    // Our defaultOperandSize logic correctly handles this.
+
+                    const destRegFullIndex = modrm.reg + (rex_r << 3);
+                    const destRegName = this.getRegisterString(destRegFullIndex, destSizeBytes, rexPrefix !== 0);
+
+                    const rmOperand = this.resolveModRMOperand(modrm, srcSizeBytes, rex_x, rex_b, rexPrefix !== 0);
+
+                    let sourceValue;
+                    if (rmOperand.type === 'reg') {
+                        sourceValue = this.readRegister(rmOperand.name, srcSizeBytes);
+                    } else { // Memory source
+                        if (srcSizeBytes === 1) {
+                            sourceValue = BigInt(this.readVirtualUint8(rmOperand.address));
+                        } else { // 2 bytes
+                            sourceValue = BigInt(this.readVirtualUint16(rmOperand.address));
+                        }
+                    }
+
+                    // Write the smaller source value to the larger destination register.
+                    // Our writeRegister function already handles the zero-extension correctly!
+                    // For example, writeRegister('eax', 0x1234, 4) will set RAX to 0x1234,
+                    // zeroing the upper 32 bits, which is the correct behavior.
+                    this.writeRegister(destRegName, sourceValue, destSizeBytes);
+                    
+                    const srcStr = rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`;
+                    utils.log(`Decoded: MOVZX ${destRegName.toUpperCase()}, ${srcStr}`);
                     return true;
                 }
 
@@ -573,31 +644,6 @@ export class CPU {
 
             // Priority 2: Handle single-byte opcodes (only if not a two-byte opcode)
 
-            // ADD r/m8, reg8
-            if (opcode === 0x00) {
-                const modrm = this.readModRMByte();
-            
-                const regName = this.getRegisterString(modrm.reg, 1, false);
-                const regVal = this.readRegister(regName, 1) & 0xFFn;
-            
-                let destAddr;
-            
-                if (modrm.mod === 0 && modrm.rm === 0) {
-                    const bx = this.readRegister("bx", 2);
-                    const si = this.readRegister("si", 2);
-                    destAddr = Number((bx + si) & 0xFFFFn);
-                } else {
-                    throw new Error(`ADD: Mod/RM mode not yet implemented (mod=${modrm.mod}, rm=${modrm.rm})`);
-                }
-            
-                const memVal = BigInt(this.memory.readUint8(destAddr)) & 0xFFn;
-                const result = (memVal + regVal) & 0xFFn;
-            
-                this.memory.writeUint8(destAddr, Number(result));
-                utils.log(`Decoded: ADD [BX+SI], ${regName} (0x${regVal.toString(16)}) → Result: 0x${result.toString(16)}`);
-                return true;
-            }
-
             // NOP instruction
             if (opcode === 0x90) {
                 utils.log("Decoded: NOP");
@@ -647,7 +693,6 @@ export class CPU {
                 if (opcode >= 0xB0 && opcode <= 0xB7) { // 8-bit MOV (B0-B7)
                     sizeBytes = 1;
                 } else { // 16/32/64-bit MOV (B8-BF)
-                    // THIS IS THE CORRECTED LOGIC
                     if (this.mode === 'long') {
                         sizeBytes = rex_w ? 8 : (this.operandSizeOverride ? 2 : 4);
                     } else { // Real or Protected mode
@@ -1258,7 +1303,7 @@ export class CPU {
 
                 const regOpFullIndex = modrm.reg + (rex_r << 3);
                 const regOpName = this.getRegisterString(regOpFullIndex, sizeBytes, rexPrefix !== 0);
-                const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rex_x, rexPrefix !== 0);
+                const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_x, rex_b, rexPrefix !== 0);
                 
                 const fullRegNameForVerify = this.registers[regOpName]; // Get the full 64-bit register name (e.g., 'rax' from 'ax')
 
@@ -1296,86 +1341,53 @@ export class CPU {
                     utils.log(`  Read value 0x${sourceValue.toString(16)} from r/m. Writing to ${destRegName}.`);
                     this.writeRegister(destRegName, sourceValue, sizeBytes);
 
-                    // === THIS IS THE CRITICAL NEW LOG ===
                     utils.log(`  VERIFY: After writing to ${destRegName}, the full register ${fullRegNameForVerify} is now 0x${this[fullRegNameForVerify].toString(16)}`);
-                    // ===================================
                 }
                 utils.log(`--- MOV [r/m],reg END ---`);
                 return true;
             }
 
-            // MOV r/m{16,32,64}, imm{16,32,64} (0xC7 /0)
-            if (opcode === 0xC7) {
+            // MOV r/m, imm (0xC6 /0 for byte, 0xC7 /0 for word/dword/qword)
+            if (opcode === 0xC6 || opcode === 0xC7) {
                 const modrm = this.readModRMByte();
-                
-                // For 0xC7, the reg field in ModR/M should be 0
-                if (modrm.reg !== 0) {
+                if (modrm.reg !== 0) { // /0 opcode extension
                     throw new Error(`Invalid ModR/M reg field for MOV r/m, imm: ${modrm.reg}`);
                 }
+
+                const wBit = opcode & 0x01;
+                let destSizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
                 
-                // Determine operand size based on prefix and mode
-                let sizeBytes, targetSizeBytes;
-                if (rexPrefix !== 0 && (rexPrefix & 0x08)) {  // REX.W prefix
-                    sizeBytes = 4;  // 32-bit immediate sign-extended to 64-bit
-                    targetSizeBytes = 8;  // Target is 64-bit
-                } else if (this.operandSizeOverride) {
-                    sizeBytes = 2; // 16-bit with 66h prefix
-                    targetSizeBytes = 2;
-                } else {
-                    sizeBytes = 4; // 32-bit
-                    targetSizeBytes = 4;
+                // In 64-bit mode, a 32-bit destination with C7 is the default.
+                // REX.W promotes it to 64-bit.
+                if (this.mode === 'long' && wBit === 1 && !rex_w) {
+                    destSizeBytes = 4;
                 }
-                
-                // Read immediate value
-                let immValue = this.readSignedImmediate(sizeBytes);
-                
-                // Sign extend to 64 bits if needed
-                if (sizeBytes === 4 && targetSizeBytes === 8) {
-                    immValue = BigInt.asIntN(32, immValue);
-                }
-                
-                // Resolve the destination operand with target size
-                const rmOperand = this.resolveModRMOperand(modrm, targetSizeBytes, rex_r, rex_b, rexPrefix !== 0);
-                
-                // Write the immediate to the destination
+
+                const rmOperand = this.resolveModRMOperand(modrm, destSizeBytes, rex_x, rex_b, rexPrefix !== 0);
+
+                // Determine immediate size. For 64-bit destinations, it's a 32-bit immediate.
+                const immediateSizeBytes = (destSizeBytes === 8) ? 4 : destSizeBytes;
+                const immediateValue = this.readSignedImmediate(immediateSizeBytes);
+
+                // Write the value to the destination
                 if (rmOperand.type === 'reg') {
-                    this.writeRegister(rmOperand.name, immValue, targetSizeBytes);
-                } else {
-                    // For memory destination, use the actual size of the immediate
-                    if (sizeBytes === 1) {
-                        this.writeVirtualUint8(rmOperand.address, Number(immValue));
-                    } else if (sizeBytes === 2) {
-                        this.writeVirtualUint16(rmOperand.address, Number(immValue));
-                    } else if (sizeBytes === 4) {
-                        this.writeVirtualUint32(rmOperand.address, Number(immValue));
-                    } else {
-                        throw new Error(`Unsupported size for MOV r/m, imm: ${sizeBytes} bytes`);
+                    this.writeRegister(rmOperand.name, immediateValue, destSizeBytes);
+                } else { // Memory Destination
+                    if (destSizeBytes === 1) {
+                        this.writeVirtualUint8(rmOperand.address, Number(immediateValue));
+                    } else if (destSizeBytes === 2) {
+                        this.writeVirtualUint16(rmOperand.address, Number(immediateValue));
+                    } else if (destSizeBytes === 4) {
+                        this.writeVirtualUint32(rmOperand.address, Number(immediateValue));
+                    } else { // 8 bytes (qword)
+                        // The immediate is 32-bit but needs to be sign-extended to 64-bit
+                        const finalValue = BigInt.asIntN(32, immediateValue);
+                        this.writeVirtualBigUint64(rmOperand.address, finalValue);
                     }
                 }
                 
-                utils.log(`Decoded: MOV ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`}, 0x${immValue.toString(16)}`);
-                return true;
-            }
-
-            // MOV r/m8, imm8 (0xC6 /0)
-            if (opcode === 0xC6) {
-                const modrm = this.readModRMByte();
-            
-                if (modrm.reg !== 0) {
-                    throw new Error(`Invalid ModR/M reg field for MOV r/m8, imm8: ${modrm.reg}`);
-                }
-            
-                const rmOperand = this.resolveModRMOperand(modrm, 1, rex_r, rex_b, rexPrefix !== 0);
-            
-                const immValue = this.readSignedImmediate(1); // Reads and advances RIP by 1
-            
-                if (rmOperand.type === 'reg') {
-                    this.writeRegister(rmOperand.name, immValue, 1);
-                } else {
-                    this.writeVirtualUint8(rmOperand.address, Number(immValue));
-                }
-            
-                utils.log(`Decoded: MOV byte ${rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `[0x${rmOperand.address.toString(16)}]`}, 0x${immValue.toString(16)}`);
+                const destStr = rmOperand.type === 'reg' ? rmOperand.name.toUpperCase() : `${destSizeBytes === 1 ? "BYTE" : destSizeBytes === 2 ? "WORD" : destSizeBytes === 4 ? "DWORD" : "QWORD"} [0x${rmOperand.address.toString(16)}]`;
+                utils.log(`Decoded: MOV ${destStr}, 0x${immediateValue.toString(16)}`);
                 return true;
             }
 
@@ -1390,7 +1402,7 @@ export class CPU {
                     throw new Error(`Invalid segment register index: ${modrm.reg}`);
                 }
             
-                const rmOperand = this.resolveModRMOperand(modrm, 2, rex_r, rex_b, rexPrefix !== 0);
+                const rmOperand = this.resolveModRMOperand(modrm, 2, rex_x, rex_b, rexPrefix !== 0);
             
                 let value;
                 if (rmOperand.type === 'reg') {
@@ -1406,17 +1418,29 @@ export class CPU {
                 return true;
             }
 
-            // PUSH reg (0x50 + reg_index)
+            // PUSH reg (0x50 - 0x57)
             if (opcode >= 0x50 && opcode <= 0x57) {
-                const regIdx = opcode - 0x50;
-                const sizeBytes = 8;
-                const regName = this.getRegisterString(regIdx, sizeBytes, rexPrefix !== 0);
+                // The operand size is determined by the effective default size.
+                // In Real/Protected mode, it's 16/32. In Long mode, it's always 64.
+                const sizeBytes = (this.mode === 'long') ? 8 : defaultOperandSize;
+
+                const regIdx = (opcode - 0x50) + (rex_b << 3);
+                // Use the full 64-bit register name even for 16/32-bit pushes
+                // because we read the value from the full register.
+                const regName = this.getRegisterString(regIdx, 8, rexPrefix !== 0);
                 const value = this.readRegister(regName, sizeBytes);
-                utils.log(`PUSH ${regName.toUpperCase()} - RSP Before: 0x${this.rsp.toString(16)}`);
+
                 this.rsp -= BigInt(sizeBytes);
-                this.writeVirtualBigUint64(this.rsp, value);
-                utils.log(`Decoded: PUSH ${regName.toUpperCase()} (0x${value.toString(16)}n)`);
-                utils.log(`PUSH ${regName.toUpperCase()} - RSP After: 0x${this.rsp.toString(16)}`);
+                
+                if (sizeBytes === 2) {
+                    this.writeVirtualUint16(this.rsp, value);
+                } else if (sizeBytes === 4) {
+                    this.writeVirtualUint32(this.rsp, value);
+                } else { // 8 bytes
+                    this.writeVirtualBigUint64(this.rsp, value);
+                }
+
+                utils.log(`Decoded: PUSH ${this.getRegisterString(regIdx, sizeBytes, rexPrefix !== 0).toUpperCase()}`);
                 return true;
             }
 
@@ -1447,18 +1471,26 @@ export class CPU {
                 }
             }
 
-            // POP reg (0x58 + reg_index)
+            // POP reg (0x58 - 0x5F)
             if (opcode >= 0x58 && opcode <= 0x5F) {
-                const regIdx = opcode - 0x58;
-                const sizeBytes = 8;
+                const sizeBytes = (this.mode === 'long') ? 8 : defaultOperandSize;
+
+                const regIdx = (opcode - 0x58) + (rex_b << 3);
                 const regName = this.getRegisterString(regIdx, sizeBytes, rexPrefix !== 0);
-                utils.log(`POP ${regName.toUpperCase()} - RSP Before: 0x${this.rsp.toString(16)}`);
-                const value = this.readVirtualBigUint64(this.rsp);
+                
+                let value;
+                if (sizeBytes === 2) {
+                    value = this.readVirtualUint16(this.rsp);
+                } else if (sizeBytes === 4) {
+                    value = this.readVirtualUint32(this.rsp);
+                } else { // 8 bytes
+                    value = this.readVirtualBigUint64(this.rsp);
+                }
+
                 this.writeRegister(regName, value, sizeBytes);
                 this.rsp += BigInt(sizeBytes);
                 
-                utils.log(`Decoded: POP ${regName.toUpperCase()} (0x${value.toString(16)}n)`);
-                utils.log(`POP ${regName.toUpperCase()} - RSP After: 0x${this.rsp.toString(16)}`);
+                utils.log(`Decoded: POP ${regName.toUpperCase()}`);
                 return true;
             }
 
@@ -1492,15 +1524,27 @@ export class CPU {
 
             // CALL rel32 (0xE8) - Near, relative, 32-bit displacement
             if (opcode === 0xE8) {
+                // The instruction is 5 bytes long: 1 for the opcode (E8) + 4 for the displacement.
+                const instructionLength = 5n;
+
+                // The return address is ALWAYS the address of the instruction AFTER this one.
+                // We use currentRIPBeforeFetch as our stable anchor to calculate this.
+                const retAddr = currentRIPBeforeFetch + instructionLength;
+
+                // Now, read the displacement from the stream. This will advance the real 'this.rip'.
                 const displacement = this.readSignedImmediate(4);
-                const retAddr = this.rip;
-                utils.log(`CALL rel32 - RSP Before: 0x${this.rsp.toString(16)}`);
+
+                // The jump target is the return address + the displacement.
+                const newRip = retAddr + displacement;
+
+                // Push the return address to the stack.
                 this.rsp -= 8n;
                 this.writeVirtualBigUint64(this.rsp, retAddr);
-                this.rip += BigInt(displacement);
 
-                utils.log(`Decoded: CALL rel32 0x${displacement.toString(16)} (RIP adjusted to 0x${this.rip.toString(16)})`);
-                utils.log(`CALL rel32 - RSP After: 0x${this.rsp.toString(16)}`);
+                // Set RIP to the target function's address.
+                this.rip = newRip;
+
+                utils.log(`Decoded: CALL rel32 (Jumping to 0x${newRip.toString(16)}, Return Address: 0x${retAddr.toString(16)})`);
                 return true;
             }
 
@@ -1789,7 +1833,7 @@ export class CPU {
                 this.rip = this.readVirtualBigUint64(this.rsp);
                 this.rsp += 8n;
                 
-                const new_cs = this.readVirtualBigUint64(this.rsp);
+                this.readVirtualBigUint64(this.rsp);
                 this.rsp += 8n;
                 
                 const new_rflags = this.readVirtualBigUint64(this.rsp);
@@ -1871,7 +1915,7 @@ export class CPU {
                     // Opcode 0xFF uses defaultOperandSize (word, dword, or qword).
                     let sizeBytes = (wBit === 0) ? 1 : defaultOperandSize;
 
-                    const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_r, rex_b, rex_x, rexPrefix !== 0);
+                    const rmOperand = this.resolveModRMOperand(modrm, sizeBytes, rex_x, rex_b, rexPrefix !== 0);
                     
                     let value;
                     // Read the current value from the register or memory
@@ -2095,65 +2139,79 @@ export class CPU {
         return addr;
     }
 
-    resolveModRMOperand(modrm, sizeBytes, rex_x, rex_b, hasRexPrefixForNaming) {
-        if (modrm.mod === 0x03) {
+    resolveModRMOperand(modrm, sizeBytes, rex_x, rex_b, hasRexPrefix) {
+        if (modrm.mod === 0b11) {
             const rmIndex = modrm.rm + (rex_b << 3);
-            return { type: 'reg', name: this.getRegisterString(rmIndex, sizeBytes, hasRexPrefixForNaming) };
+            return { type: 'reg', name: this.getRegisterString(rmIndex, sizeBytes, hasRexPrefix) };
+        }
+
+        let effectiveAddressSize;
+        if (this.mode === 'real') {
+            effectiveAddressSize = this.addressSizeOverride ? 32 : 16;
+        } else { // Protected or Long Mode
+            effectiveAddressSize = this.addressSizeOverride ? 16 : 32;
         }
 
         let effectiveAddress = 0n;
-        let displacement = 0n;
-        const sibPresent = (modrm.rm === 0x04);
 
-        // --- Step 1: Calculate Base + Index*Scale ---
-        if (sibPresent) {
-            const sib = this.readInstructionByte();
-            const scale = 1 << ((sib >>> 6) & 0x03);
-            const indexBits = ((sib >>> 3) & 0x07) + (rex_x << 3);
-            const baseBits = (sib & 0x07) + (rex_b << 3);
-
-            // Add Index * Scale (if index is not RSP)
-            if (indexBits !== 4) {
-                const indexRegName = this.getRegisterString(indexBits, 8, true);
-                effectiveAddress += this.readRegister(indexRegName, 8) * BigInt(scale);
+        if (effectiveAddressSize === 16) {
+            // --- 16-bit Addressing Logic ---
+            const baseLookups = ['bx+si', 'bx+di', 'bp+si', 'bp+di', 'si', 'di', 'bp', 'bx'];
+            
+            if (modrm.mod === 0b00 && modrm.rm === 0b110) {
+                effectiveAddress = BigInt(this.readInstructionUint16());
+            } else {
+                const baseStr = baseLookups[modrm.rm];
+                if (baseStr.includes('bx')) effectiveAddress += this.readRegister('bx', 2);
+                if (baseStr.includes('si')) effectiveAddress += this.readRegister('si', 2);
+                if (baseStr.includes('di')) effectiveAddress += this.readRegister('di', 2);
+                if (baseStr.includes('bp')) effectiveAddress += this.readRegister('bp', 2);
             }
 
-            // Add Base register. The special disp32-only case is handled below.
-            if (modrm.mod !== 0x00 || baseBits !== 5) {
-                const baseRegName = this.getRegisterString(baseBits, 8, true);
-                effectiveAddress += this.readRegister(baseRegName, 8);
+            if (modrm.mod === 0b01) {
+                effectiveAddress += this.readSignedImmediate(1);
+            } else if (modrm.mod === 0b10) {
+                effectiveAddress += this.readSignedImmediate(2);
             }
-
-        } else if (modrm.rm === 0x05) {
-            // RIP-relative addressing is a disp32 added to the *next* RIP
-            effectiveAddress = this.rip; // Base for calculation is the RIP after this instruction
+            
+            return { type: 'mem', address: effectiveAddress & 0xFFFFn, sizeBytes };
         } else {
-            // Simple [reg] base
-            const baseRegIndex = modrm.rm + (rex_b << 3);
-            const baseRegName = this.getRegisterString(baseRegIndex, 8, true);
-            effectiveAddress = this.readRegister(baseRegName, 8);
-        }
+            // --- 32/64-bit Addressing Logic ---
+            // (Your existing SIB logic goes here, unchanged)
+            const sibPresent = (modrm.rm === 0b100);
 
-        // --- Step 2: Add Displacement based on ModR/M.mod ---
-        if (modrm.mod === 0x01) {
-            displacement = this.readSignedImmediate(1); // disp8
-            effectiveAddress += displacement;
-        } else if (modrm.mod === 0x02) {
-            displacement = this.readSignedImmediate(4); // disp32
-            effectiveAddress += displacement;
-        } else if (modrm.mod === 0x00) {
-            // THIS IS THE CRITICAL FIX
-            // Check for disp32 cases that exist even when mod is 00.
-            // Case 1: [RIP + disp32] (ModR/M.r/m = 5)
-            // Case 2: [SIB + disp32] (SIB.base = 5)
-            const sibBaseIsRBP = sibPresent && ((this.memory.readUint8(Number(this.rip - 1n)) & 0x07) === 5);
-            if ((!sibPresent && modrm.rm === 5) || sibBaseIsRBP) {
-                displacement = this.readSignedImmediate(4);
-                effectiveAddress += displacement;
+            if (sibPresent) {
+                const sib = this.readInstructionByte();
+                const scale = 1 << ((sib >>> 6) & 0x03);
+                const indexBits = ((sib >>> 3) & 0x07) + (rex_x << 3);
+                const baseBits = (sib & 0x07) + (rex_b << 3);
+
+                if (indexBits !== 0b100) {
+                    const indexRegName = this.getRegisterString(indexBits, 8, true);
+                    effectiveAddress += this.readRegister(indexRegName, 8) * BigInt(scale);
+                }
+
+                if (modrm.mod !== 0b00 || baseBits !== 0b101) {
+                    const baseRegName = this.getRegisterString(baseBits, 8, true);
+                    effectiveAddress += this.readRegister(baseRegName, 8);
+                }
+            } else if (modrm.mod === 0b00 && modrm.rm === 0b101) {
+                effectiveAddress = this.rip + this.readSignedImmediate(4);
+                return { type: 'mem', address: effectiveAddress, sizeBytes };
+            } else {
+                const baseRegIndex = modrm.rm + (rex_b << 3);
+                const baseRegName = this.getRegisterString(baseRegIndex, 8, hasRexPrefix);
+                effectiveAddress = this.readRegister(baseRegName, 8);
             }
-        }
 
-        return { type: 'mem', address: effectiveAddress, sizeBytes: sizeBytes };
+            if (modrm.mod === 0b01) {
+                effectiveAddress += this.readSignedImmediate(1);
+            } else if (modrm.mod === 0b10) {
+                effectiveAddress += this.readSignedImmediate(4);
+            }
+            
+            return { type: 'mem', address: effectiveAddress, sizeBytes };
+        }
     }
 
     updateCPUMode() {
